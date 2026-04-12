@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shiny-hunter"
+version = "0.1.0"
+description = "Nintendo Switch automation from a Raspberry Pi using Bluetooth control and video feedback."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "vkindschi" }
+]
+dependencies = []
+
+[project.scripts]
+shiny-hunter = "shiny_hunter.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
