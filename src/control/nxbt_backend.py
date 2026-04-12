@@ -12,7 +12,7 @@ def _import_nxbt():
         import nxbt  # type: ignore
         return nxbt
     except ModuleNotFoundError:
-        repo_root = Path(__file__).resolve().parents[3]
+        repo_root = Path(__file__).resolve().parents[2]
         local_checkout = repo_root / "tools" / "nxbt"
         if local_checkout.exists():
             sys.path.insert(0, str(local_checkout))

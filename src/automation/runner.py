@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from shiny_hunter.control import Button, ControllerBackend
+from control import Button, ControllerBackend
 
 
 @dataclass(slots=True)

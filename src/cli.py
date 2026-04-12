@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import argparse
 
-from shiny_hunter.automation import HuntRunner
-from shiny_hunter.control import Button, NxbtBackend
+from automation import HuntRunner
+from control import Button, NxbtBackend
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="shiny-hunter")
+    parser = argparse.ArgumentParser(prog="switch-automation")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     doctor = subparsers.add_parser("doctor", help="Validate the local control backend import.")

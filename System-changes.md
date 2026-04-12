@@ -1,6 +1,8 @@
 # System Changes
 
-This file documents persistent system-level changes made while getting `shiny-hunter` working on this Raspberry Pi, why they matter, and how to revert them if they interfere with normal Raspberry Pi usage.
+This file documents persistent system-level changes made while getting `switch-automation` working on this Raspberry Pi, why they matter, and how to revert them if they interfere with normal Raspberry Pi usage.
+
+Repo-local paths in this document are written relative to the repository root. True system paths such as `/etc/...` and `/var/...` remain absolute because they refer to machine-level configuration outside this repo.
 
 ## 1. BlueZ systemd override: controller-only `bluetoothd`
 
@@ -107,8 +109,8 @@ sudo systemctl restart bluetooth.service
 ## 4. Workspace-local Python environment settings
 
 Changed files in this workspace only:
-- `/home/vkindschi/ShinyHunter/.vscode/settings.json`
-- `/home/vkindschi/ShinyHunter/.venv/pyvenv.cfg`
+- `.vscode/settings.json`
+- `.venv/pyvenv.cfg`
 
 Why this was changed:
 - VS Code and the shell were using system Python/pip instead of the workspace venv.
@@ -126,10 +128,10 @@ Possible side effects:
 How to revert:
 
 ```bash
-rm /home/vkindschi/ShinyHunter/.vscode/settings.json
+rm .vscode/settings.json
 ```
 
-Edit `/home/vkindschi/ShinyHunter/.venv/pyvenv.cfg` and change:
+Edit `.venv/pyvenv.cfg` and change:
 
 ```ini
 include-system-site-packages = true
@@ -179,13 +181,13 @@ Possible side effects:
 How to verify the current address:
 
 ```bash
-sudo /home/vkindschi/ShinyHunter/tools/bdaddr/bdaddr -i hci0
+sudo ./tools/bdaddr/bdaddr -i hci0
 ```
 
 How to revert to the original address:
 
 ```bash
-sudo /home/vkindschi/ShinyHunter/tools/bdaddr/bdaddr -i hci0 -r DC:A6:32:AE:06:C9
+sudo ./tools/bdaddr/bdaddr -i hci0 -r DC:A6:32:AE:06:C9
 sudo hciconfig hci0 reset
 ```
 

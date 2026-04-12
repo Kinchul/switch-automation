@@ -1,6 +1,6 @@
 # Switch-Automation
 
-The repo is now centered on one goal: automate a Nintendo Switch from a Raspberry Pi by:
+Goal: Automate a Nintendo Switch from a Raspberry Pi by:
 
 - sending controller input through a modern Bluetooth backend
 - reading game state from captured video frames
@@ -8,16 +8,22 @@ The repo is now centered on one goal: automate a Nintendo Switch from a Raspberr
 
 ## Project layout
 
-- `src/shiny_hunter/control/`
+- `src/control/`
   Bluetooth controller backends. The default path is an `NXBT` wrapper.
-- `src/shiny_hunter/automation/`
+- `src/automation/`
   High-level hunt loops, macros, and decision logic.
-- `src/shiny_hunter/vision/`
+- `src/vision/`
   Frame capture and future OCR/template-matching helpers.
+- `scripts/keyboard_control.py`
+  Working terminal controller built on `NXBT` and `curses`, with arrow-key support and clean shutdown handling.
+- `scripts/pair_switch.py`
+  Pairing helper for first-time setup. It automatically sends `L` + `R` after the controller appears on the Switch pairing screen.
 - `tools/nxbt/`
-  Vendored local copy of `NXBT`, including the small compatibility fixes used by this project.
+  Vendored local copy of `NXBT`, kept in-tree for now with the local Bluetooth compatibility fixes used by this project.
 - `tools/bdaddr/`
-  Local utility source used to inspect or restore the Pi Bluetooth MAC address when needed.
+  Vendored local `bdaddr` utility source used to inspect or restore the Pi Bluetooth MAC address when needed. This stays as a normal directory in the repo, not a submodule.
+- `System-changes.md`
+  Notes for the machine-level Bluetooth and environment changes made on the Raspberry Pi outside normal project code.
 
 ## Quick start
 
@@ -37,7 +43,7 @@ python -m pip install -e ./tools/nxbt
 Run the CLI help:
 
 ```bash
-shiny-hunter --help
+switch-automation --help
 ```
 
 For an immediate manual control test from the terminal:
@@ -50,6 +56,12 @@ If you want to force first-time pairing through `Change Grip/Order`:
 
 ```bash
 sudo ./.venv/bin/python scripts/keyboard_control.py --pairing-menu
+```
+
+To run the dedicated pairing helper:
+
+```bash
+sudo ./.venv/bin/python scripts/pair_switch.py
 ```
 
 ## Near-term plan
