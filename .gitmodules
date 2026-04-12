@@ -1,0 +1,6 @@
+[submodule "tools/nxbt"]
+	path = tools/nxbt
+	url = git@github.com:Kinchul/nxbt.git
+[submodule "tools/bdaddr"]
+	path = tools/bdaddr
+	url = git@github.com:thxomas/bdaddr.git
