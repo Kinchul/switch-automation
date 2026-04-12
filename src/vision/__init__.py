@@ -1,3 +1,3 @@
-from .capture import open_capture
+from .capture import CameraCapture, open_capture
 
-__all__ = ["open_capture"]
+__all__ = ["CameraCapture", "open_capture"]

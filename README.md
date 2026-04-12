@@ -3,7 +3,7 @@
 Goal: Automate a Nintendo Switch from a Raspberry Pi by:
 
 - sending controller input through a modern Bluetooth backend
-- reading game state from captured video frames
+- reading game state from camera frames
 - running hunt logic in one automation loop
 
 ## Project layout
@@ -13,7 +13,9 @@ Goal: Automate a Nintendo Switch from a Raspberry Pi by:
 - `src/automation/`
   High-level hunt loops, macros, and decision logic.
 - `src/vision/`
-  Frame capture and future OCR/template-matching helpers.
+  CSI camera capture plus future state-detection helpers.
+- `scripts/camera_debug.py`
+  Camera helper for snapshots, sample collection, and a VLC-viewable TCP preview feed.
 - `scripts/keyboard_control.py`
   Working terminal controller built on `NXBT` and `curses`, with arrow-key support and clean shutdown handling.
 - `scripts/pair_switch.py`
@@ -64,8 +66,28 @@ To run the dedicated pairing helper:
 sudo ./.venv/bin/python scripts/pair_switch.py
 ```
 
+To save a camera snapshot from the CSI camera:
+
+```bash
+./.venv/bin/python scripts/camera_debug.py snapshot --output debug/camera/snapshot.jpg
+```
+
+To collect a small batch of sample frames:
+
+```bash
+./.venv/bin/python scripts/camera_debug.py sample --output-dir debug/camera/samples --count 20 --interval 1.0
+```
+
+To start a VLC-viewable TCP preview feed:
+
+```bash
+./.venv/bin/python scripts/camera_debug.py stream --width 1920 --height 1080 --fps 20
+```
+
+Then open `tcp/h264://PI_IP:8888` in VLC from another machine.
+
 ## Near-term plan
 
 1. Use `NXBT` for reliable button presses and macros.
-2. Read frames from an HDMI capture device attached to the Raspberry Pi.
+2. Read frames from the CSI camera mounted in front of the Switch display.
 3. Add simple state detection before building more game-specific logic.
