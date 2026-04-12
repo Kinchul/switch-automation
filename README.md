@@ -1,6 +1,4 @@
-# shiny-hunter
-
-`shiny-hunter` is the new home for this project.
+# Switch-Automation
 
 The repo is now centered on one goal: automate a Nintendo Switch from a Raspberry Pi by:
 
