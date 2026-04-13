@@ -73,19 +73,43 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.05,
         help="How often to re-check the detector between button presses.",
     )
+    parser.add_argument(
+        "--target-failed-threshold",
+        type=float,
+        default=0.07,
+        help="Maximum normalized difference for the target-failed image match. Lower is stricter.",
+    )
     parser.add_argument("--step-timeout", type=float, default=45.0)
     parser.add_argument("--blackscreen-timeout", type=float, default=25.0)
     parser.add_argument("--outcome-timeout", type=float, default=20.0)
     parser.add_argument(
+        "--post-connect-restart-delay",
+        type=float,
+        default=1.5,
+        help="How long to wait after a fresh controller connect before sending the restart combo.",
+    )
+    parser.add_argument(
+        "--target-failed-hold",
+        type=float,
+        default=1.0,
+        help="How long the target-failed image must stay matched before we confirm a retry.",
+    )
+    parser.add_argument(
         "--success-candidate-hold",
         type=float,
-        default=2.0,
-        help="How long a non-black, non-failure scene must persist before we stop as a success candidate.",
+        default=5.0,
+        help="How long a non-black, non-failure scene must persist before we stop as a success candidate. Higher is safer.",
     )
     parser.add_argument(
         "--debug-dir",
         type=Path,
         default=ROOT / "debug" / "camera" / "outcomes",
+    )
+    parser.add_argument(
+        "--failed-roi-dir",
+        type=Path,
+        default=ROOT / "debug" / "camera" / "failed_rois",
+        help="Directory where matched target-failed ROI crops are saved.",
     )
     parser.add_argument(
         "--stats-file",
@@ -143,7 +167,7 @@ def build_config(args: argparse.Namespace) -> CameraLoopConfig:
             search_step=4,
         ),
         select_save_detector=StaticImageDetector(
-            name="select_save",
+            name="continue",
             image_path=images_dir / "2_select_save.png",
             roi=Roi(x=491, y=204, width=278, height=60),
             threshold=0.08,
@@ -173,7 +197,7 @@ def build_config(args: argparse.Namespace) -> CameraLoopConfig:
             name="target_failed",
             image_path=images_dir / "6_target_failed.png",
             roi=Roi(x=1040, y=186, width=381, height=337),
-            threshold=0.10,
+            threshold=args.target_failed_threshold,
             search_margin=args.search_margin,
             stride=4,
             search_step=2,
@@ -190,8 +214,11 @@ def build_config(args: argparse.Namespace) -> CameraLoopConfig:
         step_timeout=args.step_timeout,
         blackscreen_timeout=args.blackscreen_timeout,
         outcome_timeout=args.outcome_timeout,
+        post_connect_restart_delay=args.post_connect_restart_delay,
+        target_failed_hold=args.target_failed_hold,
         success_candidate_hold=args.success_candidate_hold,
         debug_dir=args.debug_dir,
+        failed_roi_dir=args.failed_roi_dir,
         stats_file=args.stats_file,
         control_file=args.control_file,
     )
@@ -329,26 +356,43 @@ def _start_preview_server(
     port: int,
     fps: float,
     overlay_state_fn,
-    max_tries: int = 5,
 ):
-    last_error = None
-    for attempt in range(max_tries):
-        try_port = port + attempt
+    replaced_holder = False
+    while True:
         try:
             return MjpegPreviewServer(
                 capture=capture,
-                port=try_port,
+                port=port,
                 fps=fps,
                 overlay_state_fn=overlay_state_fn,
             ).start()
         except OSError as exc:
-            last_error = exc
             if getattr(exc, "errno", None) == 98:
-                continue
+                holder_pid = _pid_listening_on_port(port)
+                if (
+                    not replaced_holder
+                    and holder_pid is not None
+                    and holder_pid != os.getpid()
+                    and _pid_matches_camera_service(holder_pid)
+                ):
+                    replaced_holder = True
+                    print(f"Preview port {port} is held by stale run_camera_loop process (pid={holder_pid}). Replacing it...")
+                    _terminate_process(holder_pid)
+                    time.sleep(0.2)
+                    continue
+
+                holder_detail = ""
+                if holder_pid is not None:
+                    holder_command = _command_for_pid(holder_pid)
+                    if holder_command:
+                        holder_detail = f" Holder pid={holder_pid}: {holder_command}"
+                    else:
+                        holder_detail = f" Holder pid={holder_pid}."
+                raise OSError(
+                    f"Preview port {port} is already in use. Refusing to fall back to another port."
+                    f"{holder_detail}"
+                ) from exc
             raise
-    raise OSError(
-        f"Failed to bind preview server on ports {port}-{port + max_tries - 1}: {last_error}"
-    )
 
 
 def _acquire_service_lock(lock_path: Path):
@@ -411,6 +455,13 @@ def _parse_lock_pid(holder: str) -> int | None:
 
 
 def _pid_matches_camera_service(pid: int) -> bool:
+    command = _command_for_pid(pid)
+    if command is None:
+        return False
+    return _command_looks_like_camera_service(command)
+
+
+def _command_for_pid(pid: int) -> str | None:
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "args="],
@@ -419,18 +470,44 @@ def _pid_matches_camera_service(pid: int) -> bool:
             text=True,
         )
     except Exception:
-        return False
-    return _command_looks_like_camera_service(result.stdout.strip())
+        return None
+    return result.stdout.strip()
 
 
 def _command_looks_like_camera_service(command: str) -> bool:
     return (
         command != ""
-        and "sudo " not in command
         and "python" in command
         and "scripts/run_camera_loop.py" in command
-        and "--action run" in command
+        and (
+            "--action run" in command
+            or "--action" not in command
+        )
     )
+
+
+def _pid_listening_on_port(port: int) -> int | None:
+    try:
+        result = subprocess.run(
+            ["ss", "-ltnp"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+
+    needle = f":{port}"
+    for line in result.stdout.splitlines():
+        if needle not in line:
+            continue
+        marker = "pid="
+        if marker not in line:
+            continue
+        pid_text = line.split(marker, 1)[1].split(",", 1)[0].split(")", 1)[0].strip()
+        if pid_text.isdigit():
+            return int(pid_text)
+    return None
 
 
 def _terminate_process(pid: int) -> None:

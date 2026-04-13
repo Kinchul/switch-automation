@@ -186,44 +186,63 @@ $watcher.IncludeSubdirectories = $true
 $watcher.EnableRaisingEvents = $true
 $watcher.NotifyFilter = [System.IO.NotifyFilters]'FileName, DirectoryName, LastWrite, Size, CreationTime'
 
-$pendingChange = $false
-$lastRelevantChangeAt = [DateTime]::MinValue
-$pendingPaths = New-Object System.Collections.Generic.List[string]
-
-$onChange = {
-    $repoRootPath = $Event.MessageData.RepoRoot
-    $fullPath = [string]$Event.SourceEventArgs.FullPath
-    if (-not $fullPath.StartsWith($repoRootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-        return
+$sourceIdentifiers = @(
+    "switch-sync-changed",
+    "switch-sync-created",
+    "switch-sync-deleted",
+    "switch-sync-renamed"
+)
+foreach ($sourceIdentifier in $sourceIdentifiers) {
+    Get-EventSubscriber -SourceIdentifier $sourceIdentifier -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+            Unregister-Event -SubscriptionId $_.SubscriptionId -ErrorAction SilentlyContinue
+        }
+        catch {
+        }
+        try {
+            $_ | Remove-Job -Force -ErrorAction SilentlyContinue
+        }
+        catch {
+        }
     }
-
-    $relativePath = $fullPath.Substring($repoRootPath.Length).TrimStart('\')
-    if ([string]::IsNullOrWhiteSpace($relativePath)) {
-        return
-    }
-    if (Test-ExcludedRelativePath -RelativePath $relativePath) {
-        return
-    }
-
-    $script:pendingChange = $true
-    $script:lastRelevantChangeAt = Get-Date
-    $normalized = $relativePath -replace "\\", "/"
-    $script:pendingPaths.Add($normalized)
-    Write-Host "[$($script:lastRelevantChangeAt.ToString('HH:mm:ss'))] Change detected: $normalized"
 }
 
 $subscriptions = @()
-$subscriptions += Register-ObjectEvent -InputObject $watcher -EventName Changed -Action $onChange -MessageData @{ RepoRoot = $repoRoot }
-$subscriptions += Register-ObjectEvent -InputObject $watcher -EventName Created -Action $onChange -MessageData @{ RepoRoot = $repoRoot }
-$subscriptions += Register-ObjectEvent -InputObject $watcher -EventName Deleted -Action $onChange -MessageData @{ RepoRoot = $repoRoot }
-$subscriptions += Register-ObjectEvent -InputObject $watcher -EventName Renamed -Action $onChange -MessageData @{ RepoRoot = $repoRoot }
+$subscriptions += Register-ObjectEvent -InputObject $watcher -EventName Changed -SourceIdentifier "switch-sync-changed"
+$subscriptions += Register-ObjectEvent -InputObject $watcher -EventName Created -SourceIdentifier "switch-sync-created"
+$subscriptions += Register-ObjectEvent -InputObject $watcher -EventName Deleted -SourceIdentifier "switch-sync-deleted"
+$subscriptions += Register-ObjectEvent -InputObject $watcher -EventName Renamed -SourceIdentifier "switch-sync-renamed"
 
 try {
+    $pendingChange = $false
+    $lastRelevantChangeAt = [DateTime]::MinValue
+    $pendingPaths = New-Object System.Collections.Generic.List[string]
+
     Write-Host "Watching $repoRoot for changes. Press Ctrl+C to stop."
     Invoke-Sync -RepoRoot $repoRoot -CurrentPiHost $PiHost -CurrentRemoteDir $RemoteDir -CurrentDryRun:$DryRun | Out-Null
 
     while ($true) {
-        Wait-Event -Timeout 0.5 | Out-Null
+        $eventRecord = Wait-Event -Timeout 0.5
+        if ($eventRecord) {
+            try {
+                $fullPath = [string]$eventRecord.SourceEventArgs.FullPath
+                if ($fullPath.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $relativePath = $fullPath.Substring($repoRoot.Length).TrimStart('\')
+                    if (-not [string]::IsNullOrWhiteSpace($relativePath)) {
+                        if (-not (Test-ExcludedRelativePath -RelativePath $relativePath)) {
+                            $pendingChange = $true
+                            $lastRelevantChangeAt = Get-Date
+                            $normalized = $relativePath -replace "\\", "/"
+                            [void]$pendingPaths.Add($normalized)
+                            Write-Host "[$($lastRelevantChangeAt.ToString('HH:mm:ss'))] Change detected: $normalized"
+                        }
+                    }
+                }
+            }
+            finally {
+                Remove-Event -EventIdentifier $eventRecord.EventIdentifier -ErrorAction SilentlyContinue
+            }
+        }
 
         if (-not $pendingChange) {
             continue
