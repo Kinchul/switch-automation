@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +13,8 @@ from control import Button, ControllerBackend, ControllerConnectCancelled
 from vision import CameraCapture, encode_rgb_frame
 from vision.detector import BlackScreenDetector, MatchResult, Roi, StaticImageDetector
 from vision.stream import OverlayBox, OverlayState
+
+NotifyCallback = Callable[[str, str, list[Path]], None]
 
 
 @dataclass(slots=True)
@@ -227,8 +230,9 @@ class CameraLoopConfig:
     step_timeout: float = 45.0
     blackscreen_timeout: float = 25.0
     outcome_timeout: float = 20.0
-    target_failed_hold: float = 1.0
-    success_candidate_hold: float = 2.0
+    outcome_settle_delay: float = 0.7
+    target_failed_hold: float = 0.8
+    success_candidate_hold: float = 3.5
     debug_dir: Path = Path("debug/camera/outcomes")
     failed_roi_dir: Path = Path("debug/camera/failed_rois")
     stats_file: Path = Path("debug/camera/loop_stats.json")
@@ -247,10 +251,12 @@ class CameraLoopRunner:
         controller: ControllerBackend,
         capture: CameraCapture,
         config: CameraLoopConfig,
+        notify_cb: NotifyCallback | None = None,
     ) -> None:
         self.controller = controller
         self.capture = capture
         self.config = config
+        self.notify_cb = notify_cb
         self.stats = PersistentLoopStats.load(config.stats_file)
         self.control = PersistentLoopControl.load(config.control_file)
         self._last_checkpoint_monotonic = time.monotonic()
@@ -259,6 +265,10 @@ class CameraLoopRunner:
         self._preview_step = "idle"
         self._preview_detail: str | None = None
         self._preview_boxes: list[OverlayBox] = []
+        self._latest_outcome_frame_path: Path | None = None
+        self._latest_failed_roi_path: Path | None = None
+        self._latest_candidate_roi_path: Path | None = None
+        self._timeout_reset_count = 0
 
     def connect(self) -> bool:
         if self._controller_connected:
@@ -311,6 +321,7 @@ class CameraLoopRunner:
                     snapshot = self.stats.finish_loop("stopped", status="stopped")
                     self._print_timers(snapshot)
                     print("Stop requested. Automation is now idle.")
+                    self._notify("Loop stopped", "Stop requested while the loop was running.")
                     break
                 except RestartRequested:
                     snapshot = self.stats.finish_loop("restart_requested", status="stopped")
@@ -323,13 +334,18 @@ class CameraLoopRunner:
                 print(f"Outcome: {outcome.status} - {outcome.detail}")
 
                 if outcome.status == "retry":
+                    if "Timed out" in outcome.detail:
+                        self._timeout_reset_count += 1
                     snapshot = self.stats.finish_loop("retry", status="stopped")
                     self._print_timers(snapshot)
                     if attempts and attempt >= attempts:
                         self.stats.mark_status("stopped", last_outcome="max_attempts")
-                        return LoopOutcome("max_attempts", f"Stopped after {attempt} retry attempts.")
+                        final_outcome = LoopOutcome("max_attempts", f"Stopped after {attempt} retry attempts.")
+                        self._notify(self._notification_title(final_outcome), final_outcome.detail)
+                        return final_outcome
                     if self._consume_control_command() == "stop":
                         print("Stop requested after retry. Automation is now idle.")
+                        self._notify("Loop stopped", "Stop requested after an automatic retry.")
                         break
                     continue
 
@@ -340,6 +356,7 @@ class CameraLoopRunner:
                     snapshot = self.stats.finish_loop(outcome.status, status=final_status)
                 self._print_timers(snapshot)
                 print("Automation returned to stopped mode.")
+                self._notify(self._notification_title(outcome), outcome.detail)
                 break
 
         return LoopOutcome("stopped", "Service stopped.")
@@ -353,7 +370,7 @@ class CameraLoopRunner:
 
         try:
             if not self._press_until_select_save():
-                return LoopOutcome("error", 'Timed out before reaching "continue".')
+                return LoopOutcome("retry", 'Timed out before reaching "continue".')
         except UnexpectedSceneMatched as exc:
             return LoopOutcome(
                 "error",
@@ -376,14 +393,14 @@ class CameraLoopRunner:
             timeout=self.config.step_timeout,
             label='Pressing B until "previously" disappears',
         ):
-            return LoopOutcome("error", 'Timed out while trying to dismiss the "previously" screen.')
+            return LoopOutcome("retry", 'Timed out while trying to dismiss the "previously" screen.')
 
         if not self._wait_until_match(
             detector=self.config.ready_detector,
             timeout=self.config.step_timeout,
             label='Waiting for the "ready" scene after "previously"',
         ):
-            return LoopOutcome("error", 'Timed out waiting for the "ready" scene after "previously".')
+            return LoopOutcome("retry", 'Timed out waiting for the "ready" scene after "previously".')
 
         if not self._press_until_match(
             button=Button.A,
@@ -391,7 +408,7 @@ class CameraLoopRunner:
             timeout=self.config.blackscreen_timeout,
             label='Pressing A until the fight black screen appears from "ready"',
         ):
-            return LoopOutcome("error", "Timed out waiting for the fight transition black screen.")
+            return LoopOutcome("retry", "Timed out waiting for the fight transition black screen.")
 
         return self._wait_for_outcome()
 
@@ -512,33 +529,36 @@ class CameraLoopRunner:
     ) -> bool:
         print(label)
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            self._abort_if_control_requested()
-            frame = self.capture.get_frame()
-            self._raise_on_unexpected_scene(
-                frame=frame,
-                expected_detector=detector,
-                abort_detectors=abort_detectors,
-                step=label,
-            )
-            result = detector.match(frame)
-            self._set_preview_detector(step=label, detector=detector, result=result)
-            print(f"  {self._format_detector_result(detector, result)}")
-            if result.matched:
-                print("  matched")
-                return True
+        try:
+            while time.monotonic() < deadline:
+                self._abort_if_control_requested()
+                frame = self.capture.get_frame()
+                self._raise_on_unexpected_scene(
+                    frame=frame,
+                    expected_detector=detector,
+                    abort_detectors=abort_detectors,
+                    step=label,
+                )
+                result = detector.match(frame)
+                self._set_preview_detector(step=label, detector=detector, result=result)
+                print(f"  {self._format_detector_result(detector, result)}")
+                if result.matched:
+                    print("  matched")
+                    return True
 
-            self._press(button)
-            time.sleep(self.config.settle_time)
-            self._checkpoint_stats()
-            if self._wait_until_next_press_for_match(
-                detector=detector,
-                label=label,
-                deadline=deadline,
-                abort_detectors=abort_detectors,
-            ):
-                return True
-        return False
+                self._press(button)
+                time.sleep(self.config.settle_time)
+                self._checkpoint_stats()
+                if self._wait_until_next_press_for_match(
+                    detector=detector,
+                    label=label,
+                    deadline=deadline,
+                    abort_detectors=abort_detectors,
+                ):
+                    return True
+            return False
+        finally:
+            pass
 
     def _press_until_missing(
         self,
@@ -551,33 +571,36 @@ class CameraLoopRunner:
         print(label)
         deadline = time.monotonic() + timeout
         seen_once = False
-        while time.monotonic() < deadline:
-            self._abort_if_control_requested()
-            frame = self.capture.get_frame()
-            result = detector.match(frame)
-            self._set_preview_detector(
-                step=label,
-                detector=detector,
-                result=result,
-                detail="Waiting for the prompt to disappear." if seen_once else None,
-            )
-            print(f"  {self._format_detector_result(detector, result)}")
-            if result.matched:
-                seen_once = True
-            if seen_once and not result.matched:
+        try:
+            while time.monotonic() < deadline:
+                self._abort_if_control_requested()
+                frame = self.capture.get_frame()
+                result = detector.match(frame)
                 self._set_preview_detector(
                     step=label,
                     detector=detector,
                     result=result,
-                    detail="Prompt disappeared.",
+                    detail="Waiting for the prompt to disappear." if seen_once else None,
                 )
-                print("  no longer visible")
-                return True
+                print(f"  {self._format_detector_result(detector, result)}")
+                if result.matched:
+                    seen_once = True
+                if seen_once and not result.matched:
+                    self._set_preview_detector(
+                        step=label,
+                        detector=detector,
+                        result=result,
+                        detail="Prompt disappeared.",
+                    )
+                    print("  no longer visible")
+                    return True
 
-            self._press(button)
-            time.sleep(self.config.settle_time)
-            self._sleep_until_next_press()
-        return False
+                self._press(button)
+                time.sleep(self.config.settle_time)
+                self._sleep_until_next_press()
+            return False
+        finally:
+            pass
 
     def _wait_until_match(
         self,
@@ -588,18 +611,21 @@ class CameraLoopRunner:
     ) -> bool:
         print(label)
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            self._abort_if_control_requested()
-            frame = self.capture.get_frame()
-            result = detector.match(frame)
-            self._set_preview_detector(step=label, detector=detector, result=result)
-            print(f"  {self._format_detector_result(detector, result)}")
-            if result.matched:
-                print("  matched")
-                return True
-            time.sleep(self.config.poll_interval)
-            self._checkpoint_stats()
-        return False
+        try:
+            while time.monotonic() < deadline:
+                self._abort_if_control_requested()
+                frame = self.capture.get_frame()
+                result = detector.match(frame)
+                self._set_preview_detector(step=label, detector=detector, result=result)
+                print(f"  {self._format_detector_result(detector, result)}")
+                if result.matched:
+                    print("  matched")
+                    return True
+                time.sleep(self.config.poll_interval)
+                self._checkpoint_stats()
+            return False
+        finally:
+            pass
 
     def _wait_until_next_press_for_match(
         self,
@@ -655,91 +681,100 @@ class CameraLoopRunner:
 
     def _wait_for_outcome(self) -> LoopOutcome:
         print("Waiting for outcome after the black screen...")
+        if self.config.outcome_settle_delay > 0:
+            print(f"Settling outcome scene for {self.config.outcome_settle_delay:.1f}s...")
+            time.sleep(self.config.outcome_settle_delay)
         deadline = time.monotonic() + self.config.outcome_timeout
         first_failed_at: float | None = None
         first_non_black_at: float | None = None
 
-        while time.monotonic() < deadline:
-            self._abort_if_control_requested()
-            frame = self.capture.get_frame()
-            failed = self.config.target_failed_detector.match(frame)
-            if failed.matched:
-                if first_failed_at is None:
-                    first_failed_at = time.monotonic()
-                failed_for = time.monotonic() - first_failed_at
-                self._set_preview_detector(
-                    step="Outcome: target failed candidate",
-                    detector=self.config.target_failed_detector,
-                    result=failed,
-                    detail=f"Matched for {failed_for:.1f}s (score={failed.score:.4f})",
-                )
-                print(f"  target failed candidate: score={failed.score:.4f}, visible_for={failed_for:.1f}s")
-                if failed_for >= self.config.target_failed_hold:
+        try:
+            while time.monotonic() < deadline:
+                self._abort_if_control_requested()
+                frame = self.capture.get_frame()
+                failed = self.config.target_failed_detector.match(frame)
+                if failed.matched:
+                    if first_failed_at is None:
+                        first_failed_at = time.monotonic()
+                    failed_for = time.monotonic() - first_failed_at
                     self._set_preview_detector(
-                        step="Outcome: target failed",
+                        step="Outcome: target failed candidate",
                         detector=self.config.target_failed_detector,
                         result=failed,
-                        detail=f"Matched for {failed_for:.1f}s; confirming retry.",
+                        detail=f"Matched for {failed_for:.1f}s (score={failed.score:.4f})",
                     )
-                    self._save_failed_roi(frame, failed)
-                    return LoopOutcome(
-                        "retry",
-                        f"Target failed image matched for {failed_for:.1f}s (score={failed.score:.4f}).",
-                    )
-            else:
-                first_failed_at = None
+                    print(f"  target failed candidate: score={failed.score:.4f}, visible_for={failed_for:.1f}s")
+                    if failed_for >= self.config.target_failed_hold:
+                        self._set_preview_detector(
+                            step="Outcome: target failed",
+                            detector=self.config.target_failed_detector,
+                            result=failed,
+                            detail=f"Matched for {failed_for:.1f}s; confirming retry.",
+                        )
+                        self._save_failed_roi(frame, failed)
+                        return LoopOutcome(
+                            "retry",
+                            f"Target failed image matched for {failed_for:.1f}s (score={failed.score:.4f}).",
+                        )
+                else:
+                    first_failed_at = None
 
-            black = self.config.black_screen_detector.match(frame)
-            self._set_preview_detector(
-                step="Waiting for outcome",
-                detector=self.config.black_screen_detector,
-                result=black,
-                detail=(
-                    f"black={black.score:.4f} failed={failed.score:.4f}"
-                    if black.matched
-                    else f"visible scene for {0.0 if first_non_black_at is None else time.monotonic() - first_non_black_at:.1f}s"
-                ),
+                black = self.config.black_screen_detector.match(frame)
+                self._set_preview_detector(
+                    step="Waiting for outcome",
+                    detector=self.config.black_screen_detector,
+                    result=black,
+                    detail=(
+                        f"black={black.score:.4f} failed={failed.score:.4f}"
+                        if black.matched
+                        else f"visible scene for {0.0 if first_non_black_at is None else time.monotonic() - first_non_black_at:.1f}s"
+                    ),
+                )
+                if black.matched:
+                    first_non_black_at = None
+                    print(
+                        f"  still on black transition: black={black.score:.4f}, "
+                        f"failed={failed.score:.4f}"
+                    )
+                else:
+                    if first_non_black_at is None:
+                        first_non_black_at = time.monotonic()
+                    visible_for = time.monotonic() - first_non_black_at
+                    print(
+                        f"  visible scene: black={black.score:.4f}, "
+                        f"failed={failed.score:.4f}, visible_for={visible_for:.1f}s"
+                    )
+                    if visible_for >= self.config.success_candidate_hold:
+                        self._set_preview_detector(
+                            step="Outcome: success candidate",
+                            detector=self.config.black_screen_detector,
+                            result=black,
+                            detail=f"Visible for {visible_for:.1f}s with no failure image.",
+                        )
+                        self._save_candidate_roi(frame, failed)
+                        saved = self._save_outcome_frame(frame)
+                        return LoopOutcome(
+                            "success_candidate",
+                            f"No failure image detected after transition. Saved frame to {saved}.",
+                        )
+
+                time.sleep(self.config.poll_interval)
+                self._checkpoint_stats()
+
+            self._save_candidate_roi(self.capture.get_frame(), None)
+            saved = self._save_outcome_frame(self.capture.get_frame())
+            return LoopOutcome(
+                "timeout",
+                f"Outcome phase timed out without a failure match. Saved frame to {saved}.",
             )
-            if black.matched:
-                first_non_black_at = None
-                print(
-                    f"  still on black transition: black={black.score:.4f}, "
-                    f"failed={failed.score:.4f}"
-                )
-            else:
-                if first_non_black_at is None:
-                    first_non_black_at = time.monotonic()
-                visible_for = time.monotonic() - first_non_black_at
-                print(
-                    f"  visible scene: black={black.score:.4f}, "
-                    f"failed={failed.score:.4f}, visible_for={visible_for:.1f}s"
-                )
-                if visible_for >= self.config.success_candidate_hold:
-                    self._set_preview_detector(
-                        step="Outcome: success candidate",
-                        detector=self.config.black_screen_detector,
-                        result=black,
-                        detail=f"Visible for {visible_for:.1f}s with no failure image.",
-                    )
-                    saved = self._save_outcome_frame(frame)
-                    return LoopOutcome(
-                        "success_candidate",
-                        f"No failure image detected after transition. Saved frame to {saved}.",
-                    )
-
-            time.sleep(self.config.poll_interval)
-            self._checkpoint_stats()
-
-        saved = self._save_outcome_frame(self.capture.get_frame())
-        return LoopOutcome(
-            "timeout",
-            f"Outcome phase timed out without a failure match. Saved frame to {saved}.",
-        )
+        finally:
+            pass
 
     def _save_outcome_frame(self, frame) -> Path:
         self.config.debug_dir.mkdir(parents=True, exist_ok=True)
         path = self.config.debug_dir / f"outcome-{time.strftime('%Y%m%d-%H%M%S')}.jpg"
         self.capture.save_frame(path)
+        self._latest_outcome_frame_path = path
         return path
 
     def _save_failed_roi(self, frame, result: MatchResult) -> Path:
@@ -756,7 +791,28 @@ class CameraLoopRunner:
             f"target-failed-{time.strftime('%Y%m%d-%H%M%S')}-score-{result.score:.4f}.jpg"
         )
         path.write_bytes(encode_rgb_frame(cropped, quality=95))
+        self._latest_failed_roi_path = path
         print(f"  saved failed ROI to {path}")
+        return path
+
+    def _save_candidate_roi(self, frame, result: MatchResult | None) -> Path:
+        roi = self.config.target_failed_detector.roi
+        offset_x = result.offset_x if result is not None else 0
+        offset_y = result.offset_y if result is not None else 0
+        crop_roi = Roi(
+            x=roi.x + offset_x,
+            y=roi.y + offset_y,
+            width=roi.width,
+            height=roi.height,
+        )
+        cropped = crop_roi.crop(frame)
+        self.config.failed_roi_dir.mkdir(parents=True, exist_ok=True)
+        path = self.config.failed_roi_dir / (
+            f"candidate-roi-{time.strftime('%Y%m%d-%H%M%S')}.jpg"
+        )
+        path.write_bytes(encode_rgb_frame(cropped, quality=95))
+        self._latest_candidate_roi_path = path
+        print(f"  saved candidate ROI to {path}")
         return path
 
     def _press(self, button: Button) -> None:
@@ -819,17 +875,14 @@ class CameraLoopRunner:
         snapshot = self.stats.snapshot()
         with self._preview_lock:
             step = self._preview_step
-            detail = self._preview_detail
         lines = [
             f"mode: {snapshot.status}",
             f"total: {_format_duration(snapshot.total_elapsed_seconds)}",
             f"loop: {_format_duration(snapshot.loop_elapsed_seconds)}",
             f"count: {snapshot.loop_counter}",
-            f"last: {snapshot.last_outcome or '-'}",
             f"step: {step}",
+            f"timeouts: {self._timeout_reset_count}",
         ]
-        if detail:
-            lines.append(detail)
         return lines
 
     def preview_overlay_state(self) -> OverlayState:
@@ -928,6 +981,51 @@ class CameraLoopRunner:
         if result.detail:
             return f"{detector_name}: score={result.score:.4f} ({result.detail})"
         return f"{detector_name}: score={result.score:.4f}"
+
+    def _notification_title(self, outcome: LoopOutcome) -> str:
+        if outcome.status == "success_candidate":
+            return "Successful target candidate"
+        return "Loop stopped"
+
+    def _notify(self, title: str, detail: str) -> None:
+        if self.notify_cb is None:
+            return
+        try:
+            self.notify_cb(title, self._notification_body(detail), self._notification_attachments())
+        except Exception as exc:
+            print(f"Notification failed: {exc}")
+
+    def _notification_body(self, detail: str) -> str:
+        snapshot = self.stats.snapshot()
+        with self._preview_lock:
+            step = self._preview_step
+            preview_detail = self._preview_detail
+        lines = [
+            detail,
+            "",
+            f"mode: {snapshot.status}",
+            f"total: {_format_duration(snapshot.total_elapsed_seconds)}",
+            f"loop: {_format_duration(snapshot.loop_elapsed_seconds)}",
+            f"count: {snapshot.loop_counter}",
+            f"last: {snapshot.last_outcome or '-'}",
+            f"step: {step}",
+            f"timeouts: {self._timeout_reset_count}",
+        ]
+        if preview_detail:
+            lines.append(f"debug: {preview_detail}")
+        return "\n".join(lines)
+
+    def _notification_attachments(self) -> list[Path]:
+        attachments: list[Path] = []
+        for path in (
+            self._latest_outcome_frame_path,
+            self._latest_candidate_roi_path,
+            self._latest_failed_roi_path,
+        ):
+            if path is not None and path.exists() and path not in attachments:
+                attachments.append(path)
+        return attachments
+
 
 
 def _utcnow() -> datetime:

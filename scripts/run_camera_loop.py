@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import email.message
 import sys
 from pathlib import Path
 import os
 import fcntl
 import signal
+import smtplib
+import ssl
 import subprocess
 import time
 
@@ -83,6 +86,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--blackscreen-timeout", type=float, default=25.0)
     parser.add_argument("--outcome-timeout", type=float, default=20.0)
     parser.add_argument(
+        "--outcome-settle-delay",
+        type=float,
+        default=0.7,
+        help="How long to wait after the black-screen transition before validating the target scene.",
+    )
+    parser.add_argument(
         "--post-connect-restart-delay",
         type=float,
         default=1.5,
@@ -91,13 +100,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--target-failed-hold",
         type=float,
-        default=1.0,
+        default=0.8,
         help="How long the target-failed image must stay matched before we confirm a retry.",
     )
     parser.add_argument(
         "--success-candidate-hold",
         type=float,
-        default=5.0,
+        default=3.5,
         help="How long a non-black, non-failure scene must persist before we stop as a success candidate. Higher is safer.",
     )
     parser.add_argument(
@@ -140,6 +149,53 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
         help="Preview feed frame rate while the service is running.",
+    )
+    parser.add_argument(
+        "--notify-email-to",
+        type=str,
+        default=os.getenv("SWITCH_NOTIFY_EMAIL_TO"),
+        help="Destination email address for stop/success notifications.",
+    )
+    parser.add_argument(
+        "--notify-email-from",
+        type=str,
+        default=os.getenv("SWITCH_NOTIFY_EMAIL_FROM"),
+        help="From address used for stop/success notifications.",
+    )
+    parser.add_argument(
+        "--smtp-host",
+        type=str,
+        default=os.getenv("SWITCH_SMTP_HOST"),
+        help="SMTP host for email notifications.",
+    )
+    parser.add_argument(
+        "--smtp-port",
+        type=int,
+        default=int(os.getenv("SWITCH_SMTP_PORT", "587")),
+        help="SMTP port for email notifications.",
+    )
+    parser.add_argument(
+        "--smtp-user",
+        type=str,
+        default=os.getenv("SWITCH_SMTP_USER"),
+        help="SMTP username for email notifications.",
+    )
+    parser.add_argument(
+        "--smtp-password-env",
+        type=str,
+        default="SWITCH_SMTP_PASSWORD",
+        help="Environment variable name containing the SMTP password.",
+    )
+    parser.add_argument(
+        "--smtp-ssl",
+        action="store_true",
+        default=_env_flag("SWITCH_SMTP_SSL"),
+        help="Use SMTP over implicit SSL instead of STARTTLS.",
+    )
+    parser.add_argument(
+        "--smtp-no-starttls",
+        action="store_true",
+        help="Disable STARTTLS for plain SMTP connections.",
     )
     return parser
 
@@ -214,6 +270,7 @@ def build_config(args: argparse.Namespace) -> CameraLoopConfig:
         step_timeout=args.step_timeout,
         blackscreen_timeout=args.blackscreen_timeout,
         outcome_timeout=args.outcome_timeout,
+        outcome_settle_delay=args.outcome_settle_delay,
         post_connect_restart_delay=args.post_connect_restart_delay,
         target_failed_hold=args.target_failed_hold,
         success_candidate_hold=args.success_candidate_hold,
@@ -229,6 +286,13 @@ def _format_duration(seconds: float) -> str:
     hours, rem = divmod(total, 3600)
     minutes, secs = divmod(rem, 60)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _env_flag(name: str) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _guess_ip_addresses() -> list[str]:
@@ -304,10 +368,12 @@ def main() -> int:
         reconnect=True,
         adapter_path=args.adapter_path,
     )
+    notifier = _build_email_notifier(args)
     runner = CameraLoopRunner(
         controller=controller,
         capture=capture,
         config=build_config(args),
+        notify_cb=notifier,
     )
     preview = _start_preview_server(
         capture=capture,
@@ -348,6 +414,53 @@ def main() -> int:
         controller.close()
         preview.close()
         capture.close()
+
+
+def _build_email_notifier(args: argparse.Namespace):
+    if not args.notify_email_to or not args.notify_email_from or not args.smtp_host:
+        return None
+
+    recipients = [part.strip() for part in args.notify_email_to.split(",") if part.strip()]
+    if not recipients:
+        return None
+
+    password = os.getenv(args.smtp_password_env) if args.smtp_password_env else None
+    use_starttls = not args.smtp_ssl and not args.smtp_no_starttls
+
+    def _notify(subject: str, body: str, attachments: list[Path]) -> None:
+        message = email.message.EmailMessage()
+        message["Subject"] = f"[switch-automation] {subject}"
+        message["From"] = args.notify_email_from
+        message["To"] = ", ".join(recipients)
+        message.set_content(body)
+        for attachment in attachments:
+            if not attachment.exists():
+                continue
+            data = attachment.read_bytes()
+            message.add_attachment(
+                data,
+                maintype="image",
+                subtype="jpeg",
+                filename=attachment.name,
+            )
+
+        if args.smtp_ssl:
+            with smtplib.SMTP_SSL(args.smtp_host, args.smtp_port, context=ssl.create_default_context()) as smtp:
+                if args.smtp_user:
+                    smtp.login(args.smtp_user, password or "")
+                smtp.send_message(message)
+            return
+
+        with smtplib.SMTP(args.smtp_host, args.smtp_port) as smtp:
+            smtp.ehlo()
+            if use_starttls:
+                smtp.starttls(context=ssl.create_default_context())
+                smtp.ehlo()
+            if args.smtp_user:
+                smtp.login(args.smtp_user, password or "")
+            smtp.send_message(message)
+
+    return _notify
 
 
 def _start_preview_server(
