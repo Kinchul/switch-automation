@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from control import Button, ControllerBackend, ControllerConnectCancelled
-from vision import CameraCapture
+from vision import CameraCapture, encode_rgb_frame
 from vision.detector import BlackScreenDetector, MatchResult, Roi, StaticImageDetector
 from vision.stream import OverlayBox, OverlayState
 
@@ -227,12 +227,15 @@ class CameraLoopConfig:
     step_timeout: float = 45.0
     blackscreen_timeout: float = 25.0
     outcome_timeout: float = 20.0
+    target_failed_hold: float = 1.0
     success_candidate_hold: float = 2.0
     debug_dir: Path = Path("debug/camera/outcomes")
+    failed_roi_dir: Path = Path("debug/camera/failed_rois")
     stats_file: Path = Path("debug/camera/loop_stats.json")
     control_file: Path = Path("debug/camera/loop_control.json")
     restart_combo_hold: float = 0.15
     restart_combo_release: float = 1.5
+    post_connect_restart_delay: float = 1.5
     control_poll_interval: float = 0.5
     stats_checkpoint_interval: float = 5.0
 
@@ -257,9 +260,9 @@ class CameraLoopRunner:
         self._preview_detail: str | None = None
         self._preview_boxes: list[OverlayBox] = []
 
-    def connect(self) -> None:
+    def connect(self) -> bool:
         if self._controller_connected:
-            return
+            return False
         print("Connecting controller...")
         try:
             self.controller.connect(
@@ -269,6 +272,7 @@ class CameraLoopRunner:
         except ControllerConnectCancelled:
             raise StopRequested
         self._controller_connected = True
+        return True
 
     def initialize(self) -> LoopStatsSnapshot:
         self.control.set_command("noop")
@@ -289,7 +293,13 @@ class CameraLoopRunner:
             attempt = 0
             while True:
                 attempt += 1
-                self.connect()
+                connected_now = self.connect()
+                if connected_now and self.config.post_connect_restart_delay > 0:
+                    print(
+                        "Controller connected. Waiting "
+                        f"{self.config.post_connect_restart_delay:.1f}s before restart combo..."
+                    )
+                    time.sleep(self.config.post_connect_restart_delay)
                 self._trigger_restart_loop()
                 stats = self.stats.start_new_loop()
                 self._last_checkpoint_monotonic = time.monotonic()
@@ -343,22 +353,22 @@ class CameraLoopRunner:
 
         try:
             if not self._press_until_select_save():
-                return LoopOutcome("error", 'Timed out before reaching "select save".')
+                return LoopOutcome("error", 'Timed out before reaching "continue".')
         except UnexpectedSceneMatched as exc:
             return LoopOutcome(
                 "error",
-                f'Reached "{exc.scene_name}" before "select save" (score={exc.score:.4f}); '
+                f'Reached "{exc.scene_name}" before "continue" (score={exc.score:.4f}); '
                 "stopped to avoid advancing the game blindly.",
             )
 
         self._abort_if_control_requested()
         self._set_preview_detector(
-            step='Matched "select save"',
+            step='Matched "continue"',
             detector=self.config.select_save_detector,
             detail='Pressing A once to skip the screen.',
         )
         self._press(Button.A)
-        print('Pressed A once to skip the "select save" screen.')
+        print('Pressed A once to skip the "continue" screen.')
 
         if not self._press_until_missing(
             button=Button.B,
@@ -411,11 +421,11 @@ class CameraLoopRunner:
         self._abort_if_control_requested()
         self._set_preview_boxes(
             step="Checking starting scene",
-            detail="Comparing the launch, press start, and select save ROIs.",
+            detail='Comparing the launch, press start, and "continue" ROIs.',
             boxes=[
                 self._box_for_roi("game_launch", self.config.start_detector.roi, matched=False),
                 self._box_for_roi("press_start", self.config.press_start_detector.roi, matched=False),
-                self._box_for_roi("select_save", self.config.select_save_detector.roi, matched=False),
+                self._box_for_roi("continue", self.config.select_save_detector.roi, matched=False),
             ],
         )
         frame = self.capture.get_frame()
@@ -449,12 +459,12 @@ class CameraLoopRunner:
 
         if select_result.matched:
             self._set_preview_detector(
-                step='Start scene: "select_save"',
+                step='Start scene: "continue"',
                 detector=self.config.select_save_detector,
                 result=select_result,
             )
             print(
-                'Already on "select save"; continuing from there '
+                'Already on "continue"; continuing from there '
                 f"(score={select_result.score:.4f})."
             )
             return True
@@ -464,18 +474,18 @@ class CameraLoopRunner:
             detail=(
                 "No known start detector matched. "
                 f"launch={start_result.score:.4f} press_start={press_start_result.score:.4f} "
-                f"select_save={select_result.score:.4f}"
+                f'continue={select_result.score:.4f}'
             ),
             boxes=[
                 self._box_for_roi("game_launch", self.config.start_detector.roi, matched=False),
                 self._box_for_roi("press_start", self.config.press_start_detector.roi, matched=False),
-                self._box_for_roi("select_save", self.config.select_save_detector.roi, matched=False),
+                self._box_for_roi("continue", self.config.select_save_detector.roi, matched=False),
             ],
         )
         print(
             "Current frame does not look like a known starting scene: "
             f"launch={start_result.score:.4f}, press_start={press_start_result.score:.4f}, "
-            f"select_save={select_result.score:.4f}"
+            f'continue={select_result.score:.4f}'
         )
         return False
 
@@ -484,7 +494,7 @@ class CameraLoopRunner:
             button=Button.A,
             detector=self.config.select_save_detector,
             timeout=self.config.step_timeout,
-            label='Pressing A until "select save" appears',
+            label='Pressing A until "continue" appears',
             abort_detectors=[
                 self.config.previously_detector,
                 self.config.ready_detector,
@@ -646,6 +656,7 @@ class CameraLoopRunner:
     def _wait_for_outcome(self) -> LoopOutcome:
         print("Waiting for outcome after the black screen...")
         deadline = time.monotonic() + self.config.outcome_timeout
+        first_failed_at: float | None = None
         first_non_black_at: float | None = None
 
         while time.monotonic() < deadline:
@@ -653,12 +664,30 @@ class CameraLoopRunner:
             frame = self.capture.get_frame()
             failed = self.config.target_failed_detector.match(frame)
             if failed.matched:
+                if first_failed_at is None:
+                    first_failed_at = time.monotonic()
+                failed_for = time.monotonic() - first_failed_at
                 self._set_preview_detector(
-                    step="Outcome: target failed",
+                    step="Outcome: target failed candidate",
                     detector=self.config.target_failed_detector,
                     result=failed,
+                    detail=f"Matched for {failed_for:.1f}s (score={failed.score:.4f})",
                 )
-                return LoopOutcome("retry", f"Target failed image matched (score={failed.score:.4f}).")
+                print(f"  target failed candidate: score={failed.score:.4f}, visible_for={failed_for:.1f}s")
+                if failed_for >= self.config.target_failed_hold:
+                    self._set_preview_detector(
+                        step="Outcome: target failed",
+                        detector=self.config.target_failed_detector,
+                        result=failed,
+                        detail=f"Matched for {failed_for:.1f}s; confirming retry.",
+                    )
+                    self._save_failed_roi(frame, failed)
+                    return LoopOutcome(
+                        "retry",
+                        f"Target failed image matched for {failed_for:.1f}s (score={failed.score:.4f}).",
+                    )
+            else:
+                first_failed_at = None
 
             black = self.config.black_screen_detector.match(frame)
             self._set_preview_detector(
@@ -711,6 +740,23 @@ class CameraLoopRunner:
         self.config.debug_dir.mkdir(parents=True, exist_ok=True)
         path = self.config.debug_dir / f"outcome-{time.strftime('%Y%m%d-%H%M%S')}.jpg"
         self.capture.save_frame(path)
+        return path
+
+    def _save_failed_roi(self, frame, result: MatchResult) -> Path:
+        roi = self.config.target_failed_detector.roi
+        crop_roi = Roi(
+            x=roi.x + result.offset_x,
+            y=roi.y + result.offset_y,
+            width=roi.width,
+            height=roi.height,
+        )
+        cropped = crop_roi.crop(frame)
+        self.config.failed_roi_dir.mkdir(parents=True, exist_ok=True)
+        path = self.config.failed_roi_dir / (
+            f"target-failed-{time.strftime('%Y%m%d-%H%M%S')}-score-{result.score:.4f}.jpg"
+        )
+        path.write_bytes(encode_rgb_frame(cropped, quality=95))
+        print(f"  saved failed ROI to {path}")
         return path
 
     def _press(self, button: Button) -> None:

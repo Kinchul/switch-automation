@@ -58,83 +58,38 @@ class NxbtBackend(ControllerBackend):
 
         controller_type = getattr(self._nxbt_mod, self._controller_type_name)
         adapter_path = self._pick_adapter_path(status_cb)
-        kwargs = {}
         reconnect_addresses = None
         if self._reconnect:
             reconnect_addresses = self._service.get_switch_addresses() or None
-            if reconnect_addresses:
-                kwargs["reconnect_address"] = reconnect_addresses
+        attempts: list[tuple[bool, object | None]] = []
+        if reconnect_addresses:
+            attempts.append((True, reconnect_addresses))
+        attempts.append((False, None))
 
-        if status_cb is not None:
-            if reconnect_addresses:
-                status_cb("Reconnect mode enabled. Reusing the stored Switch pairing.")
-            else:
-                status_cb('Pairing mode enabled. Keep the Switch on "Change Grip/Order".')
-
-        try:
-            self._nxbt_mod.clean_sdp_records()
-            if status_cb is not None:
-                status_cb("Cleaned BlueZ SDP records.")
-        except Exception as exc:
-            if status_cb is not None:
-                status_cb(f"Warning: could not clean SDP records: {exc}")
-
-        try:
-            subprocess.run(
-                ["btmgmt", "--index", "0", "io-cap", "0x03"],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            if status_cb is not None:
-                status_cb("Set IO capability to 0x03.")
-        except Exception as exc:
-            if status_cb is not None:
-                status_cb(f"Warning: could not set IO capability: {exc}")
-
-        if status_cb is not None:
-            status_cb(
-                "Creating controller: "
-                f"type={self._controller_type_name} adapter={adapter_path} "
-                f"reconnect={bool(reconnect_addresses)}"
-            )
-        self._controller_index = self._service.create_controller(
-            controller_type,
-            adapter_path=adapter_path,
-            **kwargs,
-        )
-        if status_cb is not None:
-            status_cb(f"Controller index: {self._controller_index}")
-        last_state = None
-        try:
-            while True:
-                if cancel_cb is not None and cancel_cb():
-                    raise ControllerConnectCancelled("Controller connect cancelled")
-
-                state_name = self._controller_state_name()
-                if state_name != last_state:
-                    last_state = state_name
+        for index, (use_reconnect, reconnect_address) in enumerate(attempts):
+            try:
+                self._connect_attempt(
+                    controller_type=controller_type,
+                    adapter_path=adapter_path,
+                    reconnect_address=reconnect_address,
+                    use_reconnect=use_reconnect,
+                    cancel_cb=cancel_cb,
+                    status_cb=status_cb,
+                )
+                return
+            except ControllerConnectCancelled:
+                self._cleanup_controller()
+                raise
+            except OSError:
+                self._cleanup_controller()
+                if use_reconnect and index < len(attempts) - 1:
                     if status_cb is not None:
-                        status_cb(state_name)
-
-                if state_name == "connected":
-                    if not reconnect_addresses:
-                        self._join_pairing_menu(status_cb)
-                    return
-
-                if state_name == "crashed":
-                    errors = self._controller_errors()
-                    if not errors:
-                        errors = (
-                            "NXBT controller process crashed without a traceback. "
-                            "A transient BlueZ/DBus timeout during pairing is a likely cause."
+                        status_cb(
+                            'Reconnect failed. Open the Switch "Change Grip/Order" page; '
+                            "retrying in pairing mode."
                         )
-                    raise OSError("The watched controller has crashed", errors)
-
-                time.sleep(0.25)
-        except ControllerConnectCancelled:
-            self._cleanup_controller()
-            raise
+                    continue
+                raise
 
     def press(self, *buttons: Button, down: float = 0.1, up: float = 0.1) -> None:
         self._require_connection()
@@ -166,6 +121,88 @@ class NxbtBackend(ControllerBackend):
     def _require_connection(self) -> None:
         if self._service is None or self._controller_index is None:
             raise RuntimeError("Controller is not connected. Call connect() first.")
+
+    def _connect_attempt(
+        self,
+        *,
+        controller_type,
+        adapter_path: str,
+        reconnect_address,
+        use_reconnect: bool,
+        cancel_cb: Callable[[], bool] | None,
+        status_cb: Callable[[str], None] | None,
+    ) -> None:
+        if status_cb is not None:
+            if use_reconnect:
+                status_cb("Reconnect mode enabled. Reusing the stored Switch pairing.")
+            else:
+                status_cb('Pairing mode enabled. Keep the Switch on "Change Grip/Order".')
+
+        try:
+            self._nxbt_mod.clean_sdp_records()
+            if status_cb is not None:
+                status_cb("Cleaned BlueZ SDP records.")
+        except Exception as exc:
+            if status_cb is not None:
+                status_cb(f"Warning: could not clean SDP records: {exc}")
+
+        try:
+            subprocess.run(
+                ["btmgmt", "--index", "0", "io-cap", "0x03"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if status_cb is not None:
+                status_cb("Set IO capability to 0x03.")
+        except Exception as exc:
+            if status_cb is not None:
+                status_cb(f"Warning: could not set IO capability: {exc}")
+
+        kwargs = {}
+        if reconnect_address is not None:
+            kwargs["reconnect_address"] = reconnect_address
+
+        if status_cb is not None:
+            status_cb(
+                "Creating controller: "
+                f"type={self._controller_type_name} adapter={adapter_path} "
+                f"reconnect={use_reconnect}"
+            )
+        self._controller_index = self._service.create_controller(
+            controller_type,
+            adapter_path=adapter_path,
+            **kwargs,
+        )
+        if status_cb is not None:
+            status_cb(f"Controller index: {self._controller_index}")
+
+        last_state = None
+        while True:
+            if cancel_cb is not None and cancel_cb():
+                raise ControllerConnectCancelled("Controller connect cancelled")
+
+            state_name = self._controller_state_name()
+            if state_name != last_state:
+                last_state = state_name
+                if status_cb is not None:
+                    status_cb(state_name)
+
+            if state_name == "connected":
+                if not use_reconnect:
+                    self._join_pairing_menu(status_cb)
+                return
+
+            if state_name == "crashed":
+                errors = self._controller_errors()
+                if not errors:
+                    errors = (
+                        "NXBT controller process crashed without a traceback. "
+                        "A transient BlueZ/DBus timeout during pairing is a likely cause."
+                    )
+                raise OSError("The watched controller has crashed", errors)
+
+            time.sleep(0.25)
 
     def _controller_state_name(self) -> str | None:
         if self._service is None or self._controller_index is None:
