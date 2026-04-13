@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from abc import ABC, abstractmethod
 from enum import Enum
 
@@ -23,7 +24,12 @@ class Button(str, Enum):
 
 class ControllerBackend(ABC):
     @abstractmethod
-    def connect(self) -> None:
+    def connect(
+        self,
+        *,
+        cancel_cb: Callable[[], bool] | None = None,
+        status_cb: Callable[[str], None] | None = None,
+    ) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -33,3 +39,11 @@ class ControllerBackend(ABC):
     @abstractmethod
     def macro(self, commands: str, block: bool = True):
         raise NotImplementedError
+
+    @abstractmethod
+    def close(self) -> None:
+        raise NotImplementedError
+
+
+class ControllerConnectCancelled(RuntimeError):
+    pass

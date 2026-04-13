@@ -1,0 +1,13 @@
+[Unit]
+Description=Finalize Bluetooth adapter profile for Switch controller emulation
+After=bluetooth.service
+Requires=bluetooth.service
+ConditionPathExists=/usr/local/sbin/finalize_switch_bluetooth.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/finalize_switch_bluetooth.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=bluetooth.service

@@ -1,0 +1,14 @@
+[Unit]
+Description=Prepare Bluetooth adapter for Switch controller emulation
+Wants=systemd-udev-settle.service
+After=systemd-udev-settle.service
+Before=bluetooth.service
+ConditionPathExists=/usr/local/sbin/setup_switch_bluetooth.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/setup_switch_bluetooth.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=bluetooth.service

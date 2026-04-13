@@ -191,6 +191,54 @@ sudo ./tools/bdaddr/bdaddr -i hci0 -r DC:A6:32:AE:06:C9
 sudo hciconfig hci0 reset
 ```
 
+## 7. Boot-time adapter setup services
+
+Added repo-local files:
+- `scripts/setup_switch_bluetooth.sh`
+- `scripts/finalize_switch_bluetooth.sh`
+- `systemd/switch-bt-setup.service`
+- `systemd/switch-bt-finalize.service`
+
+Why this was added:
+- Several critical adapter settings were not surviving a reboot consistently.
+- In particular, the Bluetooth public address could drift back to `DC:A6:32:AE:06:C9`, the adapter could come up powered off, and the controller class could fall back to `0x00000000`.
+- The setup work is split into two small services so the address is fixed before `bluetooth.service` starts and the controller class/name are re-applied after BlueZ comes up.
+
+What it enforces at boot:
+- Bluetooth public address `94:58:CB:AE:06:C9`
+- adapter powered on
+- local adapter name `Pro Controller`
+- adapter class `0x002508`
+
+How to install or reinstall it:
+
+```bash
+sudo install -m 755 tools/bdaddr/bdaddr /usr/local/sbin/bdaddr-switch
+sudo install -m 755 scripts/setup_switch_bluetooth.sh /usr/local/sbin/setup_switch_bluetooth.sh
+sudo install -m 755 scripts/finalize_switch_bluetooth.sh /usr/local/sbin/finalize_switch_bluetooth.sh
+sudo install -d /etc/systemd/system
+sudo install -m 644 systemd/switch-bt-setup.service /etc/systemd/system/switch-bt-setup.service
+sudo install -m 644 systemd/switch-bt-finalize.service /etc/systemd/system/switch-bt-finalize.service
+sudo systemctl daemon-reload
+sudo systemctl enable switch-bt-setup.service
+sudo systemctl enable switch-bt-finalize.service
+sudo systemctl restart bluetooth.service
+```
+
+How to revert:
+
+```bash
+sudo systemctl disable --now switch-bt-finalize.service
+sudo systemctl disable --now switch-bt-setup.service
+sudo rm /etc/systemd/system/switch-bt-finalize.service
+sudo rm /etc/systemd/system/switch-bt-setup.service
+sudo rm /usr/local/sbin/bdaddr-switch
+sudo rm /usr/local/sbin/finalize_switch_bluetooth.sh
+sudo rm /usr/local/sbin/setup_switch_bluetooth.sh
+sudo systemctl daemon-reload
+sudo systemctl restart bluetooth.service
+```
+
 ## Notes
 
 - This file is only for persistent machine-level changes, not normal code changes inside this repo.

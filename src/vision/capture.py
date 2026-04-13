@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
 from time import sleep
 from typing import Any
 
@@ -17,6 +18,11 @@ def _to_rgb_frame(frame: Any):
 
 
 def _save_rgb_frame(frame: Any, output_path: Path, quality: int = 95) -> None:
+    jpeg = encode_rgb_frame(frame, quality=quality)
+    output_path.write_bytes(jpeg)
+
+
+def encode_rgb_frame(frame: Any, quality: int = 95) -> bytes:
     try:
         import simplejpeg  # type: ignore
     except ModuleNotFoundError:
@@ -26,11 +32,13 @@ def _save_rgb_frame(frame: Any, output_path: Path, quality: int = 95) -> None:
             raise RuntimeError(
                 "Saving camera frames requires either `simplejpeg` or `Pillow`."
             ) from exc
-        Image.fromarray(frame).save(output_path, format="JPEG", quality=quality)
-        return
+        from io import BytesIO
 
-    jpeg = simplejpeg.encode_jpeg(frame, quality=quality, colorspace="RGB")
-    output_path.write_bytes(jpeg)
+        buffer = BytesIO()
+        Image.fromarray(frame).save(buffer, format="JPEG", quality=quality)
+        return buffer.getvalue()
+
+    return simplejpeg.encode_jpeg(frame, quality=quality, colorspace="RGB")
 
 
 @dataclass(slots=True)
@@ -41,6 +49,7 @@ class CameraCapture:
     fps: int = 20
     warmup: float = 2.0
     _camera: Any | None = field(init=False, default=None, repr=False)
+    _lock: Lock = field(init=False, default_factory=Lock, repr=False)
 
     def start(self) -> CameraCapture:
         if self._camera is not None:
@@ -84,7 +93,8 @@ class CameraCapture:
 
     def get_frame(self):
         self._require_started()
-        return _to_rgb_frame(self._camera.capture_array("main"))
+        with self._lock:
+            return _to_rgb_frame(self._camera.capture_array("main"))
 
     def save_frame(self, output_path: str | Path, quality: int = 95) -> Path:
         path = Path(output_path)
