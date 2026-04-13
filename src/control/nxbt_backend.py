@@ -147,11 +147,14 @@ class NxbtBackend(ControllerBackend):
                 status_cb(f"Warning: could not clean SDP records: {exc}")
 
         try:
+            if status_cb is not None:
+                status_cb("Setting IO capability to 0x03...")
             subprocess.run(
                 ["btmgmt", "--index", "0", "io-cap", "0x03"],
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                timeout=5.0,
             )
             if status_cb is not None:
                 status_cb("Set IO capability to 0x03.")

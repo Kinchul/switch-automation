@@ -1,0 +1,22 @@
+[Unit]
+Description=Switch camera automation loop
+Wants=network-online.target
+After=network-online.target bluetooth.service switch-bt-finalize.service
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/vkindschi/switch-automation
+Environment=PYTHONUNBUFFERED=1
+Environment=SWITCH_AUTOMATION_DIR=/home/vkindschi/switch-automation
+Environment="SWITCH_CAMERA_LOOP_ARGS=--width 1920 --height 1080 --fps 20"
+EnvironmentFile=-/etc/default/switch-camera-loop
+ExecStart=/bin/bash -lc 'exec "$SWITCH_AUTOMATION_DIR/.venv/bin/python" "$SWITCH_AUTOMATION_DIR/scripts/run_camera_loop.py" $SWITCH_CAMERA_LOOP_ARGS'
+Restart=always
+RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

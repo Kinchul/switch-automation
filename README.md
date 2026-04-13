@@ -104,6 +104,26 @@ To run the first camera-guided loop:
 sudo ./.venv/bin/python scripts/run_camera_loop.py --width 1920 --height 1080 --fps 20
 ```
 
+To run it as a boot-time `systemd` service instead:
+
+```bash
+sudo install -m 644 systemd/switch-camera-loop.service /etc/systemd/system/switch-camera-loop.service
+sudo install -m 644 systemd/switch-camera-loop.env.example /etc/default/switch-camera-loop
+sudo systemctl daemon-reload
+sudo systemctl enable --now switch-camera-loop.service
+```
+
+Adjust `/etc/default/switch-camera-loop` for your repo path, mail settings, or runner flags.
+
+Useful service commands:
+
+```bash
+sudo systemctl status switch-camera-loop.service
+sudo journalctl -u switch-camera-loop.service -f
+sudo systemctl restart switch-camera-loop.service
+sudo systemctl stop switch-camera-loop.service
+```
+
 This runner starts in stopped mode and immediately starts the camera preview feed. The Bluetooth controller is only connected when a loop is triggered.
 
 Preview feed while the service is running:
