@@ -67,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--press-interval", type=float, default=1.0)
     parser.add_argument("--settle-time", type=float, default=0.35)
     parser.add_argument("--poll-interval", type=float, default=0.25)
+    parser.add_argument(
+        "--match-poll-interval",
+        type=float,
+        default=0.05,
+        help="How often to re-check the detector between button presses.",
+    )
     parser.add_argument("--step-timeout", type=float, default=45.0)
     parser.add_argument("--blackscreen-timeout", type=float, default=25.0)
     parser.add_argument("--outcome-timeout", type=float, default=20.0)
@@ -180,6 +186,7 @@ def build_config(args: argparse.Namespace) -> CameraLoopConfig:
         press_interval=args.press_interval,
         settle_time=args.settle_time,
         poll_interval=args.poll_interval,
+        match_poll_interval=args.match_poll_interval,
         step_timeout=args.step_timeout,
         blackscreen_timeout=args.blackscreen_timeout,
         outcome_timeout=args.outcome_timeout,

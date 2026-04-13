@@ -28,6 +28,13 @@ class RestartRequested(Exception):
     pass
 
 
+class UnexpectedSceneMatched(Exception):
+    def __init__(self, scene_name: str, score: float) -> None:
+        self.scene_name = scene_name
+        self.score = score
+        super().__init__(f'Unexpected scene "{scene_name}" matched (score={score:.4f}).')
+
+
 @dataclass(slots=True)
 class LoopStatsSnapshot:
     loop_counter: int
@@ -84,7 +91,7 @@ class PersistentLoopStats:
             )
             + "\n"
         )
-        os.chmod(self.path, 0o644)
+        _chmod_if_possible(self.path, 0o644)
 
     def snapshot(self) -> LoopStatsSnapshot:
         now = _utcnow()
@@ -190,7 +197,7 @@ class PersistentLoopControl:
             )
             + "\n"
         )
-        os.chmod(self.path, 0o666)
+        _chmod_if_possible(self.path, 0o666)
 
     def set_command(self, command: str) -> None:
         self.command = command
@@ -216,6 +223,7 @@ class CameraLoopConfig:
     press_interval: float = 1.0
     settle_time: float = 0.35
     poll_interval: float = 0.25
+    match_poll_interval: float = 0.05
     step_timeout: float = 45.0
     blackscreen_timeout: float = 25.0
     outcome_timeout: float = 20.0
@@ -333,13 +341,15 @@ class CameraLoopRunner:
         if not self._ensure_starting_scene():
             return LoopOutcome("error", "Could not confirm the starting scene.")
 
-        if not self._press_until_match(
-            button=Button.A,
-            detector=self.config.select_save_detector,
-            timeout=self.config.step_timeout,
-            label='Pressing A until "select save" appears',
-        ):
-            return LoopOutcome("error", 'Timed out before reaching "select save".')
+        try:
+            if not self._press_until_select_save():
+                return LoopOutcome("error", 'Timed out before reaching "select save".')
+        except UnexpectedSceneMatched as exc:
+            return LoopOutcome(
+                "error",
+                f'Reached "{exc.scene_name}" before "select save" (score={exc.score:.4f}); '
+                "stopped to avoid advancing the game blindly.",
+            )
 
         self._abort_if_control_requested()
         self._set_preview_detector(
@@ -469,6 +479,18 @@ class CameraLoopRunner:
         )
         return False
 
+    def _press_until_select_save(self) -> bool:
+        return self._press_until_match(
+            button=Button.A,
+            detector=self.config.select_save_detector,
+            timeout=self.config.step_timeout,
+            label='Pressing A until "select save" appears',
+            abort_detectors=[
+                self.config.previously_detector,
+                self.config.ready_detector,
+            ],
+        )
+
     def _press_until_match(
         self,
         *,
@@ -476,15 +498,22 @@ class CameraLoopRunner:
         detector,
         timeout: float,
         label: str,
+        abort_detectors: list[StaticImageDetector] | None = None,
     ) -> bool:
         print(label)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self._abort_if_control_requested()
             frame = self.capture.get_frame()
+            self._raise_on_unexpected_scene(
+                frame=frame,
+                expected_detector=detector,
+                abort_detectors=abort_detectors,
+                step=label,
+            )
             result = detector.match(frame)
             self._set_preview_detector(step=label, detector=detector, result=result)
-            print(f"  {getattr(detector, 'name', 'detector')}: score={result.score:.4f}")
+            print(f"  {self._format_detector_result(detector, result)}")
             if result.matched:
                 print("  matched")
                 return True
@@ -492,7 +521,13 @@ class CameraLoopRunner:
             self._press(button)
             time.sleep(self.config.settle_time)
             self._checkpoint_stats()
-            self._sleep_until_next_press()
+            if self._wait_until_next_press_for_match(
+                detector=detector,
+                label=label,
+                deadline=deadline,
+                abort_detectors=abort_detectors,
+            ):
+                return True
         return False
 
     def _press_until_missing(
@@ -516,7 +551,7 @@ class CameraLoopRunner:
                 result=result,
                 detail="Waiting for the prompt to disappear." if seen_once else None,
             )
-            print(f"  {detector.name}: score={result.score:.4f}")
+            print(f"  {self._format_detector_result(detector, result)}")
             if result.matched:
                 seen_once = True
             if seen_once and not result.matched:
@@ -548,13 +583,65 @@ class CameraLoopRunner:
             frame = self.capture.get_frame()
             result = detector.match(frame)
             self._set_preview_detector(step=label, detector=detector, result=result)
-            print(f"  {getattr(detector, 'name', 'detector')}: score={result.score:.4f}")
+            print(f"  {self._format_detector_result(detector, result)}")
             if result.matched:
                 print("  matched")
                 return True
             time.sleep(self.config.poll_interval)
             self._checkpoint_stats()
         return False
+
+    def _wait_until_next_press_for_match(
+        self,
+        *,
+        detector,
+        label: str,
+        deadline: float,
+        abort_detectors: list[StaticImageDetector] | None = None,
+    ) -> bool:
+        end = min(deadline, time.monotonic() + max(0.0, self.config.press_interval - self.config.settle_time))
+        while time.monotonic() < end:
+            self._abort_if_control_requested()
+            frame = self.capture.get_frame()
+            self._raise_on_unexpected_scene(
+                frame=frame,
+                expected_detector=detector,
+                abort_detectors=abort_detectors,
+                step=label,
+            )
+            result = detector.match(frame)
+            self._set_preview_detector(step=label, detector=detector, result=result)
+            if result.matched:
+                print(f"  matched between presses: {self._format_detector_result(detector, result)}")
+                return True
+            time.sleep(min(self.config.match_poll_interval, max(0.0, end - time.monotonic())))
+        return False
+
+    def _raise_on_unexpected_scene(
+        self,
+        *,
+        frame,
+        expected_detector,
+        abort_detectors: list[StaticImageDetector] | None,
+        step: str,
+    ) -> None:
+        if not abort_detectors:
+            return
+
+        expected_name = self._detector_name(expected_detector)
+        for abort_detector in abort_detectors:
+            result = abort_detector.match(frame)
+            if not result.matched:
+                continue
+            scene_name = self._detector_name(abort_detector)
+            self._set_preview_detector(
+                step=f'Unexpected scene while waiting for "{expected_name}"',
+                detector=abort_detector,
+                result=result,
+                detail=f'Matched "{scene_name}" during step: {step}',
+            )
+            print(f'  unexpected scene "{scene_name}" matched while waiting for "{expected_name}"')
+            raise UnexpectedSceneMatched(scene_name, result.score)
 
     def _wait_for_outcome(self) -> LoopOutcome:
         print("Waiting for outcome after the black screen...")
@@ -767,7 +854,7 @@ class CameraLoopRunner:
             boxes = [self._box_for_roi(detector_name, focus_roi, matched=(result.matched if result else False))]
 
         if detail is None and result is not None:
-            detail = f"{detector_name}: score={result.score:.4f}"
+            detail = self._format_detector_result(detector, result)
         self._set_preview_state(step, detail, boxes)
 
     def _box_for_roi(self, label: str, roi: Roi, *, matched: bool) -> OverlayBox:
@@ -790,9 +877,24 @@ class CameraLoopRunner:
     def _detector_name(self, detector) -> str:
         return getattr(detector, "name", detector.__class__.__name__.replace("Detector", "").lower())
 
+    def _format_detector_result(self, detector, result: MatchResult) -> str:
+        detector_name = self._detector_name(detector)
+        if result.detail:
+            return f"{detector_name}: score={result.score:.4f} ({result.detail})"
+        return f"{detector_name}: score={result.score:.4f}"
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _chmod_if_possible(path: Path, mode: int) -> None:
+    try:
+        os.chmod(path, mode)
+    except PermissionError:
+        return
+    except OSError:
+        return
 
 
 def _format_duration(seconds: float) -> str:

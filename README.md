@@ -120,13 +120,13 @@ Trigger a new loop:
 sudo ./.venv/bin/python scripts/run_camera_loop.py --action restart
 ```
 
-The controller logic always uses fresh pairing mode (no reconnect). Keep the Switch on "Change Grip/Order".
+If the controller is not connected yet, use `--action pair` while the Switch is on "Change Grip/Order". Once paired, future restarts reuse that active connection.
 
 ```bash
 sudo ./.venv/bin/python scripts/run_camera_loop.py --action run --width 1920 --height 1080 --fps 20
 ```
 
-Then open the Switch "Change Grip/Order" screen and trigger the loop with `--action restart`.
+After pairing, return the game to the state where `A+B+X+Y` should trigger the next loop, then use `--action restart`.
 
 Stop the service and leave it idle:
 
@@ -140,11 +140,43 @@ Inspect the current command/timers/counter:
 ./.venv/bin/python scripts/run_camera_loop.py --action status
 ```
 
+## Local PC workflow
+
+From a Windows PC, you can sync the repo to the Pi without committing every tweak.
+
+Set the defaults once inside [`scripts/pi_sync.ps1`](</c:/Users/vkind/Documents/GitHub/switch-automation/scripts/pi_sync.ps1>) by editing:
+
+```powershell
+$DefaultHost = "pi@YOUR_PI_HOSTNAME_OR_IP"
+$DefaultRemoteDir = "switch-automation"
+```
+
+Sync the current checkout to the Pi with `scp`:
+
+```powershell
+.\scripts\pi_sync.ps1
+```
+
+You can still override either value for a one-off run:
+
+```powershell
+.\scripts\pi_sync.ps1 -PiHost pi@192.168.1.50 -RemoteDir switch-automation
+```
+
+Use `-DryRun` if you want to preview the file list without uploading:
+
+```powershell
+.\scripts\pi_sync.ps1 -DryRun
+```
+
+The sync script uses Windows OpenSSH `scp`, so no WSL or extra install is required. It uploads the filtered repo contents, but it does not delete files that already exist on the Pi and were removed locally.
+
 The runner currently:
 - confirms the start scene from the launch or press-start screens
 - presses `A` until the saved `select save` reference appears
 - presses `A` once to skip that screen
 - presses `B` until the saved `previously` reference disappears
+- waits for the saved `ready` reference after `previously` disappears
 - presses `A` until a black-screen transition is detected
 - waits for either the saved `target failed` image or a non-black success candidate
 - if the target failed image appears, sends `A+B+X+Y` together to trigger the next loop

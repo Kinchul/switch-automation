@@ -1,4 +1,4 @@
 {
-  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.defaultInterpreterPath": "C:\\Users\\vkind\\AppData\\Local\\Python\\bin\\python.exe",
   "python.terminal.activateEnvironment": true
 }

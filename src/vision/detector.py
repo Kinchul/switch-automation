@@ -25,6 +25,7 @@ class MatchResult:
     score: float
     offset_x: int = 0
     offset_y: int = 0
+    detail: str | None = None
 
 
 def load_image_rgb(path: str | Path) -> np.ndarray:
@@ -113,4 +114,8 @@ class BlackScreenDetector:
         stddev = float(grayscale.std())
         matched = mean_luma <= self.max_mean_luma and stddev <= self.max_luma_stddev
         score = max(mean_luma / max(self.max_mean_luma, 1.0), stddev / max(self.max_luma_stddev, 1.0))
-        return MatchResult(matched=matched, score=score)
+        return MatchResult(
+            matched=matched,
+            score=score,
+            detail=f"mean={mean_luma:.1f} std={stddev:.1f}",
+        )
