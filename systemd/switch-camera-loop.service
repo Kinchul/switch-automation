@@ -2,7 +2,6 @@
 Description=Switch camera automation loop
 Wants=network-online.target
 After=network-online.target bluetooth.service switch-bt-finalize.service
-Requires=bluetooth.service
 
 [Service]
 Type=simple

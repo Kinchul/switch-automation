@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from automation.camera_loop import CameraLoopConfig, CameraLoopRunner, PersistentLoopControl, PersistentLoopStats
 from control import NxbtBackend
 from vision import open_capture
-from vision.detector import BlackScreenDetector, Roi, StaticImageDetector
+from vision.detector import BlackScreenDetector, InvariantColorDetector, Roi, StaticImageDetector
 from vision.stream import MjpegPreviewServer
 
 
@@ -104,10 +104,58 @@ def build_parser() -> argparse.ArgumentParser:
         help="How long the target-failed image must stay matched before we confirm a retry.",
     )
     parser.add_argument(
+        "--target-ok-threshold",
+        type=float,
+        default=0.16,
+        help="Maximum invariant-match score for the target_ok example. Lower is stricter.",
+    )
+    parser.add_argument(
+        "--target-ok-hold",
+        type=float,
+        default=0.8,
+        help="How long target_ok must stay confidently matched before we stop the loop.",
+    )
+    parser.add_argument(
+        "--target-ok-score-margin",
+        type=float,
+        default=0.03,
+        help="How much better target_ok must score than target_fail before we accept it.",
+    )
+    parser.add_argument(
         "--success-candidate-hold",
         type=float,
         default=3.5,
         help="How long a non-black, non-failure scene must persist before we stop as a success candidate. Higher is safer.",
+    )
+    parser.add_argument(
+        "--success-candidate-fail-margin",
+        type=float,
+        default=0.03,
+        help="Extra margin above the fail threshold required before we treat a scene as safe for success-candidate timing.",
+    )
+    parser.add_argument(
+        "--success-confirm-checks",
+        type=int,
+        default=3,
+        help="How many extra confirmation samples to take before declaring a success candidate.",
+    )
+    parser.add_argument(
+        "--success-confirm-interval",
+        type=float,
+        default=0.4,
+        help="Delay between success confirmation samples.",
+    )
+    parser.add_argument(
+        "--recent-failed-store-margin",
+        type=float,
+        default=0.02,
+        help="Extra margin above the fail threshold required before storing a failed ROI for similarity checks.",
+    )
+    parser.add_argument(
+        "--timeout-recovery-limit",
+        type=int,
+        default=1,
+        help="How many times a timed-out step may scan known ROIs and resume before forcing a reset.",
     )
     parser.add_argument(
         "--debug-dir",
@@ -202,6 +250,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def build_config(args: argparse.Namespace) -> CameraLoopConfig:
     images_dir = args.images_dir
+    target_roi = Roi(x=1040, y=186, width=381, height=337)
+    target_ok_path = images_dir / "target_ok.png"
+    target_fail_path = images_dir / "target_fail.png"
 
     return CameraLoopConfig(
         start_detector=StaticImageDetector(
@@ -225,7 +276,7 @@ def build_config(args: argparse.Namespace) -> CameraLoopConfig:
         select_save_detector=StaticImageDetector(
             name="continue",
             image_path=images_dir / "2_select_save.png",
-            roi=Roi(x=491, y=204, width=278, height=60),
+            roi=Roi(x=479, y=198, width=302, height=72),
             threshold=0.08,
             search_margin=args.search_margin,
             stride=2,
@@ -252,7 +303,7 @@ def build_config(args: argparse.Namespace) -> CameraLoopConfig:
         target_failed_detector=StaticImageDetector(
             name="target_failed",
             image_path=images_dir / "6_target_failed.png",
-            roi=Roi(x=1040, y=186, width=381, height=337),
+            roi=target_roi,
             threshold=args.target_failed_threshold,
             search_margin=args.search_margin,
             stride=4,
@@ -262,6 +313,38 @@ def build_config(args: argparse.Namespace) -> CameraLoopConfig:
             roi=Roi(x=320, y=180, width=1280, height=720),
             max_mean_luma=18.0,
             max_luma_stddev=14.0,
+        ),
+        target_ok_detector=(
+            InvariantColorDetector(
+                name="target_ok",
+                image_path=target_ok_path,
+                roi=target_roi,
+                threshold=args.target_ok_threshold,
+                search_margin=0,
+                stride=4,
+                search_step=2,
+                feature_size=72,
+                mask_chroma_threshold=0.08,
+                trim_fraction=0.10,
+            )
+            if target_ok_path.exists()
+            else None
+        ),
+        target_fail_example_detector=(
+            InvariantColorDetector(
+                name="target_fail_example",
+                image_path=target_fail_path,
+                roi=target_roi,
+                threshold=args.target_ok_threshold,
+                search_margin=0,
+                stride=4,
+                search_step=2,
+                feature_size=72,
+                mask_chroma_threshold=0.08,
+                trim_fraction=0.10,
+            )
+            if target_fail_path.exists()
+            else None
         ),
         press_interval=args.press_interval,
         settle_time=args.settle_time,
@@ -273,7 +356,14 @@ def build_config(args: argparse.Namespace) -> CameraLoopConfig:
         outcome_settle_delay=args.outcome_settle_delay,
         post_connect_restart_delay=args.post_connect_restart_delay,
         target_failed_hold=args.target_failed_hold,
+        target_ok_hold=args.target_ok_hold,
+        target_ok_score_margin=args.target_ok_score_margin,
         success_candidate_hold=args.success_candidate_hold,
+        success_candidate_fail_margin=args.success_candidate_fail_margin,
+        success_confirm_checks=args.success_confirm_checks,
+        success_confirm_interval=args.success_confirm_interval,
+        recent_failed_store_margin=args.recent_failed_store_margin,
+        timeout_recovery_limit=args.timeout_recovery_limit,
         debug_dir=args.debug_dir,
         failed_roi_dir=args.failed_roi_dir,
         stats_file=args.stats_file,
