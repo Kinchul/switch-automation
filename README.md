@@ -203,6 +203,13 @@ The runner currently:
 
 If no failure image appears after the black transition, the script stops and saves the outcome frame under `debug/camera/outcomes/`.
 
+When `target_ok` is the reason the run stops, the runner also saves a short burst of pre/post frames under `debug/camera/target_ok_events/`. Each event folder contains:
+- full-frame JPEGs
+- target ROI crops for each frame
+- `metadata.json` with timestamps and detector scores
+
+This is meant to make future detector work easier for short animations like stars without changing the current success logic.
+
 The runner also persists loop stats in `debug/camera/loop_stats.json`:
 - total elapsed time across loops
 - current active loop elapsed time

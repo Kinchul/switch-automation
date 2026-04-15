@@ -33,6 +33,22 @@ class LoopOutcome:
 
 
 @dataclass(slots=True)
+class TargetOkEventSample:
+    captured_at: float
+    captured_at_utc: str
+    frame: np.ndarray
+    ready_score: float
+    failed_score: float
+    target_ok_score: float | None
+    target_fail_example_score: float | None
+    confident_target_ok: bool
+    visible_for: float | None
+    ok_for: float | None
+    target_ok_offset_x: int
+    target_ok_offset_y: int
+
+
+@dataclass(slots=True)
 class RecoveryStageMatch:
     name: str
     detector: object
@@ -261,6 +277,11 @@ class CameraLoopConfig:
     success_candidate_fail_margin: float = 0.03
     success_confirm_checks: int = 3
     success_confirm_interval: float = 0.4
+    target_ok_event_capture: bool = True
+    target_ok_event_pre_seconds: float = 1.0
+    target_ok_event_post_seconds: float = 1.0
+    target_ok_event_max_fps: float = 6.0
+    target_ok_event_dir: Path = Path("debug/camera/target_ok_events")
     recent_failed_max: int = 20
     recent_failed_similarity_threshold: float = 0.06
     recent_failed_stride: int = 4
@@ -301,6 +322,8 @@ class CameraLoopRunner:
         self._latest_outcome_frame_path: Path | None = None
         self._latest_failed_roi_path: Path | None = None
         self._latest_candidate_roi_path: Path | None = None
+        self._latest_target_ok_event_preview_path: Path | None = None
+        self._latest_target_ok_event_dir_path: Path | None = None
         self._timeout_reset_count = 0
         self._recent_failed_rois: deque[np.ndarray] = deque(maxlen=self.config.recent_failed_max)
 
@@ -1066,6 +1089,50 @@ class CameraLoopRunner:
         first_non_black_at: float | None = None
         first_target_ok_at: float | None = None
         safe_fail_score = self.config.target_failed_detector.threshold + self.config.success_candidate_fail_margin
+        target_ok_event_enabled = self._target_ok_event_capture_enabled()
+        target_ok_event_sample_interval = self._target_ok_event_sample_interval()
+        target_ok_pre_samples: deque[TargetOkEventSample] = deque(
+            maxlen=self._target_ok_event_pre_sample_capacity()
+        )
+        target_ok_event_samples: list[TargetOkEventSample] | None = None
+        target_ok_event_started_at: float | None = None
+        last_target_ok_event_sample_at: float | None = None
+
+        def record_target_ok_event_sample(
+            *,
+            frame,
+            now: float,
+            ready: MatchResult,
+            failed: MatchResult,
+            target_ok: MatchResult | None,
+            target_fail_example: MatchResult | None,
+            visible_for: float | None,
+            ok_for: float | None,
+        ) -> None:
+            nonlocal last_target_ok_event_sample_at
+            if not target_ok_event_enabled:
+                return
+            if (
+                last_target_ok_event_sample_at is not None
+                and target_ok_event_sample_interval > 0
+                and now - last_target_ok_event_sample_at < target_ok_event_sample_interval
+            ):
+                return
+
+            sample = self._build_target_ok_event_sample(
+                frame=frame,
+                now=now,
+                ready=ready,
+                failed=failed,
+                target_ok=target_ok,
+                target_fail_example=target_fail_example,
+                visible_for=visible_for,
+                ok_for=ok_for,
+            )
+            target_ok_pre_samples.append(sample)
+            if target_ok_event_samples is not None:
+                target_ok_event_samples.append(sample)
+            last_target_ok_event_sample_at = now
 
         while time.monotonic() < deadline:
             self._abort_if_control_requested()
@@ -1135,14 +1202,24 @@ class CameraLoopRunner:
             if blocked_by_fail:
                 first_non_black_at = None
                 first_target_ok_at = None
+                target_ok_event_samples = None
+                target_ok_event_started_at = None
             else:
                 if first_non_black_at is None:
                     first_non_black_at = now
                 if confident_target_ok:
                     if first_target_ok_at is None:
                         first_target_ok_at = now
+                        if target_ok_event_enabled:
+                            target_ok_event_started_at = now
+                            if self.config.target_ok_event_pre_seconds > 0:
+                                target_ok_event_samples = list(target_ok_pre_samples)
+                            else:
+                                target_ok_event_samples = []
                 else:
                     first_target_ok_at = None
+                    target_ok_event_samples = None
+                    target_ok_event_started_at = None
 
             visible_for = 0.0 if first_non_black_at is None else now - first_non_black_at
             ok_for = 0.0 if first_target_ok_at is None else now - first_target_ok_at
@@ -1152,6 +1229,16 @@ class CameraLoopRunner:
                 f"failed={failed.score:.4f}, "
                 f"visible_for={visible_for:.1f}s"
                 f"{self._target_example_debug_suffix(target_ok, target_fail_example, ok_for)}"
+            )
+            record_target_ok_event_sample(
+                frame=frame,
+                now=now,
+                ready=ready,
+                failed=failed,
+                target_ok=target_ok,
+                target_fail_example=target_fail_example,
+                visible_for=visible_for,
+                ok_for=ok_for,
             )
 
             if self.config.target_ok_detector is not None:
@@ -1165,15 +1252,60 @@ class CameraLoopRunner:
                             f"{self._target_example_detail(target_ok, target_fail_example)}"
                         ),
                     )
-                    if self._confirm_success_candidate():
+                    if self._confirm_success_candidate(
+                        event_sample_cb=record_target_ok_event_sample,
+                        event_trigger_at=target_ok_event_started_at,
+                    ):
+                        target_ok_event_dir: Path | None = None
+                        if (
+                            target_ok_event_enabled
+                            and target_ok_event_samples is not None
+                            and target_ok_event_started_at is not None
+                        ):
+                            post_deadline = (
+                                target_ok_event_started_at
+                                + max(0.0, float(self.config.target_ok_event_post_seconds))
+                            )
+                            while time.monotonic() < post_deadline:
+                                self._abort_if_control_requested()
+                                remaining = post_deadline - time.monotonic()
+                                if target_ok_event_sample_interval > 0 and remaining > 0:
+                                    time.sleep(min(target_ok_event_sample_interval, remaining))
+                                event_now = time.monotonic()
+                                event_frame = self.capture.get_frame()
+                                event_ready = self.config.ready_detector.match(event_frame)
+                                event_failed = self.config.target_failed_detector.match(event_frame)
+                                (
+                                    event_target_ok,
+                                    event_target_fail_example,
+                                ) = self._match_target_examples(event_frame)
+                                record_target_ok_event_sample(
+                                    frame=event_frame,
+                                    now=event_now,
+                                    ready=event_ready,
+                                    failed=event_failed,
+                                    target_ok=event_target_ok,
+                                    target_fail_example=event_target_fail_example,
+                                    visible_for=None,
+                                    ok_for=max(0.0, event_now - target_ok_event_started_at),
+                                )
+                            target_ok_event_dir = self._write_target_ok_event(
+                                target_ok_event_samples,
+                                trigger_at=target_ok_event_started_at,
+                            )
                         self._save_candidate_roi(frame, failed)
                         saved = self._save_outcome_frame(frame)
+                        detail = f"Target ok matched for {ok_for:.1f}s. Saved frame to {saved}."
+                        if target_ok_event_dir is not None:
+                            detail = f"{detail} Event frames saved to {target_ok_event_dir}."
                         return LoopOutcome(
                             "success_candidate",
-                            f"Target ok matched for {ok_for:.1f}s. Saved frame to {saved}.",
+                            detail,
                         )
                     first_non_black_at = None
                     first_target_ok_at = None
+                    target_ok_event_samples = None
+                    target_ok_event_started_at = None
             elif visible_for >= self.config.success_candidate_hold:
                 self._set_preview_target_roi(
                     step="Outcome: success candidate",
@@ -1341,16 +1473,36 @@ class CameraLoopRunner:
             f"{detail} Recovery stage \"{stage_name}\" is not resumable; resetting loop. Saved frame to {saved}.",
         )
 
-    def _confirm_success_candidate(self) -> bool:
+    def _confirm_success_candidate(
+        self,
+        *,
+        event_sample_cb: Callable[..., None] | None = None,
+        event_trigger_at: float | None = None,
+    ) -> bool:
         checks = max(1, int(self.config.success_confirm_checks))
         interval = max(0.0, float(self.config.success_confirm_interval))
         safe_fail_score = self.config.target_failed_detector.threshold + self.config.success_candidate_fail_margin
         for idx in range(checks):
             self._abort_if_control_requested()
+            now = time.monotonic()
             frame = self.capture.get_frame()
             ready = self.config.ready_detector.match(frame)
             failed = self.config.target_failed_detector.match(frame)
             target_ok, target_fail_example = self._match_target_examples(frame)
+            if event_sample_cb is not None:
+                ok_for = None
+                if event_trigger_at is not None:
+                    ok_for = max(0.0, now - event_trigger_at)
+                event_sample_cb(
+                    frame=frame,
+                    now=now,
+                    ready=ready,
+                    failed=failed,
+                    target_ok=target_ok,
+                    target_fail_example=target_fail_example,
+                    visible_for=None,
+                    ok_for=ok_for,
+                )
             detail = (
                 f"Confirm {idx + 1}/{checks}: "
                 f"{self._outcome_debug_detail(ready=ready, failed=failed, target_ok=target_ok, target_fail_example=target_fail_example)}"
@@ -1458,9 +1610,144 @@ class CameraLoopRunner:
     def _save_outcome_frame(self, frame) -> Path:
         self.config.debug_dir.mkdir(parents=True, exist_ok=True)
         path = self.config.debug_dir / f"outcome-{time.strftime('%Y%m%d-%H%M%S')}.jpg"
-        self.capture.save_frame(path)
+        path.write_bytes(encode_rgb_frame(frame, quality=95))
         self._latest_outcome_frame_path = path
         return path
+
+    def _target_ok_event_capture_enabled(self) -> bool:
+        return (
+            self.config.target_ok_event_capture
+            and self.config.target_ok_detector is not None
+            and self.config.target_ok_event_max_fps > 0
+            and (
+                self.config.target_ok_event_pre_seconds > 0
+                or self.config.target_ok_event_post_seconds > 0
+            )
+        )
+
+    def _target_ok_event_sample_interval(self) -> float:
+        max_fps = max(0.1, float(self.config.target_ok_event_max_fps))
+        return 1.0 / max_fps
+
+    def _target_ok_event_pre_sample_capacity(self) -> int:
+        seconds = max(0.0, float(self.config.target_ok_event_pre_seconds))
+        if seconds <= 0:
+            return 1
+        return max(1, int(seconds / self._target_ok_event_sample_interval()) + 2)
+
+    def _build_target_ok_event_sample(
+        self,
+        *,
+        frame,
+        now: float,
+        ready: MatchResult,
+        failed: MatchResult,
+        target_ok: MatchResult | None,
+        target_fail_example: MatchResult | None,
+        visible_for: float | None,
+        ok_for: float | None,
+    ) -> TargetOkEventSample:
+        offset_x = target_ok.offset_x if target_ok is not None else 0
+        offset_y = target_ok.offset_y if target_ok is not None else 0
+        return TargetOkEventSample(
+            captured_at=now,
+            captured_at_utc=_utcnow().isoformat(),
+            frame=np.ascontiguousarray(frame.copy()),
+            ready_score=ready.score,
+            failed_score=failed.score,
+            target_ok_score=None if target_ok is None else target_ok.score,
+            target_fail_example_score=(
+                None if target_fail_example is None else target_fail_example.score
+            ),
+            confident_target_ok=self._is_confident_target_ok(target_ok, target_fail_example),
+            visible_for=visible_for,
+            ok_for=ok_for,
+            target_ok_offset_x=offset_x,
+            target_ok_offset_y=offset_y,
+        )
+
+    def _write_target_ok_event(
+        self,
+        samples: list[TargetOkEventSample],
+        *,
+        trigger_at: float,
+    ) -> Path:
+        self.config.target_ok_event_dir.mkdir(parents=True, exist_ok=True)
+        event_dir = self.config.target_ok_event_dir / (
+            f"target-ok-event-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S-%f')}"
+        )
+        full_dir = event_dir / "full"
+        roi_dir = event_dir / "roi"
+        full_dir.mkdir(parents=True, exist_ok=True)
+        roi_dir.mkdir(parents=True, exist_ok=True)
+
+        roi_template = (
+            self.config.target_ok_detector.roi
+            if self.config.target_ok_detector is not None
+            else self.config.target_failed_detector.roi
+        )
+        metadata_frames: list[dict[str, object]] = []
+        trigger_index = 0
+        for index, sample in enumerate(samples):
+            full_path = full_dir / f"frame-{index:03d}.jpg"
+            full_path.write_bytes(encode_rgb_frame(sample.frame, quality=95))
+
+            crop_roi = Roi(
+                x=roi_template.x + sample.target_ok_offset_x,
+                y=roi_template.y + sample.target_ok_offset_y,
+                width=roi_template.width,
+                height=roi_template.height,
+            )
+            cropped = crop_roi.crop(sample.frame)
+            roi_path = roi_dir / f"frame-{index:03d}.jpg"
+            roi_path.write_bytes(encode_rgb_frame(cropped, quality=95))
+
+            relative_seconds = sample.captured_at - trigger_at
+            if relative_seconds >= 0 and trigger_index == 0:
+                trigger_index = index
+            metadata_frames.append(
+                {
+                    "index": index,
+                    "captured_at_utc": sample.captured_at_utc,
+                    "relative_seconds": round(relative_seconds, 3),
+                    "ready_score": round(sample.ready_score, 4),
+                    "failed_score": round(sample.failed_score, 4),
+                    "target_ok_score": (
+                        None if sample.target_ok_score is None else round(sample.target_ok_score, 4)
+                    ),
+                    "target_fail_example_score": (
+                        None
+                        if sample.target_fail_example_score is None
+                        else round(sample.target_fail_example_score, 4)
+                    ),
+                    "confident_target_ok": sample.confident_target_ok,
+                    "visible_for": None if sample.visible_for is None else round(sample.visible_for, 3),
+                    "ok_for": None if sample.ok_for is None else round(sample.ok_for, 3),
+                    "full_path": str(full_path),
+                    "roi_path": str(roi_path),
+                }
+            )
+
+        metadata_path = event_dir / "metadata.json"
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "trigger_at_utc": metadata_frames[trigger_index]["captured_at_utc"],
+                    "trigger_index": trigger_index,
+                    "sample_count": len(metadata_frames),
+                    "pre_seconds": self.config.target_ok_event_pre_seconds,
+                    "post_seconds": self.config.target_ok_event_post_seconds,
+                    "max_fps": self.config.target_ok_event_max_fps,
+                    "frames": metadata_frames,
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        self._latest_target_ok_event_dir_path = event_dir
+        self._latest_target_ok_event_preview_path = Path(metadata_frames[trigger_index]["roi_path"])
+        print(f"  saved target_ok event frames to {event_dir}")
+        return event_dir
 
     def _save_failed_roi(self, frame, result: MatchResult) -> Path:
         roi = self.config.target_failed_detector.roi
@@ -1767,6 +2054,7 @@ class CameraLoopRunner:
             self._latest_outcome_frame_path,
             self._latest_candidate_roi_path,
             self._latest_failed_roi_path,
+            self._latest_target_ok_event_preview_path,
         ):
             if path is not None and path.exists() and path not in attachments:
                 attachments.append(path)

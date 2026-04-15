@@ -146,6 +146,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Delay between success confirmation samples.",
     )
     parser.add_argument(
+        "--no-target-ok-event-capture",
+        action="store_true",
+        help="Disable saving short frame bursts around confirmed target_ok detections.",
+    )
+    parser.add_argument(
+        "--target-ok-event-pre-seconds",
+        type=float,
+        default=1.0,
+        help="How much time to keep before the first confident target_ok frame.",
+    )
+    parser.add_argument(
+        "--target-ok-event-post-seconds",
+        type=float,
+        default=1.0,
+        help="How long to keep sampling after target_ok first becomes confident.",
+    )
+    parser.add_argument(
+        "--target-ok-event-max-fps",
+        type=float,
+        default=6.0,
+        help="Maximum sampling rate for saved target_ok event frames.",
+    )
+    parser.add_argument(
         "--recent-failed-store-margin",
         type=float,
         default=0.02,
@@ -167,6 +190,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=ROOT / "debug" / "camera" / "failed_rois",
         help="Directory where matched target-failed ROI crops are saved.",
+    )
+    parser.add_argument(
+        "--target-ok-event-dir",
+        type=Path,
+        default=ROOT / "debug" / "camera" / "target_ok_events",
+        help="Directory where short target_ok event frame sets are saved.",
     )
     parser.add_argument(
         "--stats-file",
@@ -362,6 +391,11 @@ def build_config(args: argparse.Namespace) -> CameraLoopConfig:
         success_candidate_fail_margin=args.success_candidate_fail_margin,
         success_confirm_checks=args.success_confirm_checks,
         success_confirm_interval=args.success_confirm_interval,
+        target_ok_event_capture=not args.no_target_ok_event_capture,
+        target_ok_event_pre_seconds=args.target_ok_event_pre_seconds,
+        target_ok_event_post_seconds=args.target_ok_event_post_seconds,
+        target_ok_event_max_fps=args.target_ok_event_max_fps,
+        target_ok_event_dir=args.target_ok_event_dir,
         recent_failed_store_margin=args.recent_failed_store_margin,
         timeout_recovery_limit=args.timeout_recovery_limit,
         debug_dir=args.debug_dir,
