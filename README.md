@@ -213,7 +213,7 @@ This is meant to make future detector work easier for short animations like star
 The runner also persists loop stats in `debug/camera/loop_stats.json`:
 - total elapsed time across loops
 - current active loop elapsed time
-- loop counter
+- confirmed target-failed counter
 
 Those stats survive software restarts so the timers and count resume cleanly. The control command file lives at `debug/camera/loop_control.json`.
 

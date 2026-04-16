@@ -37,7 +37,7 @@ function Test-ExcludedRelativePath {
     $normalized = $RelativePath -replace "\\", "/"
     $parts = $normalized.Split("/", [System.StringSplitOptions]::RemoveEmptyEntries)
     foreach ($part in $parts) {
-        if ($part -in @(".git", ".venv", ".pytest_cache", ".mypy_cache", "__pycache__", ".codex", ".vscode", "debug")) {
+        if ($part -in @(".git", ".venv", ".pytest_cache", ".mypy_cache", "__pycache__", ".codex", ".vscode", "debug", "review")) {
             return $true
         }
     }

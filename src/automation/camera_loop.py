@@ -145,10 +145,14 @@ class PersistentLoopStats:
             self.current_loop_elapsed_seconds_accum = 0.0
             self.active_loop_started_at = None
 
-        self.loop_counter += 1
         self.current_loop_elapsed_seconds_accum = 0.0
         self.active_loop_started_at = _utcnow().isoformat()
         self.status = "running"
+        self.save()
+        return self.snapshot()
+
+    def record_target_failed_retry(self) -> LoopStatsSnapshot:
+        self.loop_counter += 1
         self.save()
         return self.snapshot()
 
@@ -396,7 +400,7 @@ class CameraLoopRunner:
                     )
                 stats = self.stats.start_new_loop()
                 self._last_checkpoint_monotonic = time.monotonic()
-                print(f"\n=== Attempt {attempt} / Loop {stats.loop_counter} ===")
+                print(f"\n=== Attempt {attempt} / Failed Count {stats.loop_counter} ===")
                 self._print_timers(stats)
                 try:
                     outcome = self.run_once(
@@ -406,7 +410,6 @@ class CameraLoopRunner:
                     snapshot = self.stats.finish_loop("stopped", status="stopped")
                     self._print_timers(snapshot)
                     print("Stop requested. Automation is now idle.")
-                    self._notify("Loop stopped", "Stop requested while the loop was running.")
                     break
                 except RestartRequested:
                     snapshot = self.stats.finish_loop("restart_requested", status="stopped")
@@ -430,7 +433,6 @@ class CameraLoopRunner:
                         return final_outcome
                     if self._consume_control_command() == "stop":
                         print("Stop requested after retry. Automation is now idle.")
-                        self._notify("Loop stopped", "Stop requested after an automatic retry.")
                         break
                     continue
 
@@ -479,27 +481,21 @@ class CameraLoopRunner:
             label="Checking starting scene",
         )
         if entry_match is None:
-            frame = self.capture.get_frame()
-            saved = self._save_outcome_frame(frame)
-            return LoopOutcome(
-                "retry",
-                f"Could not confirm a known stage after restart. Saved frame to {saved}.",
-            )
+            return self._handle_start_scene_timeout(recovery_attempts_left)
 
         if entry_match.name == "continue":
             print(f'Start scene confirmed as {entry_match.detail}.')
             return self._run_from_continue(recovery_attempts_left)
 
+        if entry_match.name == "previously":
+            print(f'Start scene confirmed as {entry_match.detail}.')
+            return self._run_from_previously(recovery_attempts_left)
+
         print(f'Start scene confirmed as {entry_match.detail}.')
         return self._run_from_start_scene(recovery_attempts_left)
 
     def _find_startup_recovery_match(self) -> RecoveryStageMatch | None:
-        match = self._scan_recovery_stage(self.capture.get_frame())
-        if match is None:
-            return None
-        if match.name == "game_launch":
-            return None
-        return match
+        return self._scan_recovery_stage(self.capture.get_frame())
 
     def _wait_for_startup_recovery_match(self, timeout: float) -> RecoveryStageMatch | None:
         timeout = max(0.0, float(timeout))
@@ -523,31 +519,46 @@ class CameraLoopRunner:
         print("No resumable stage detected; using restart combo.")
         return None
 
+    def _handle_start_scene_timeout(self, recovery_attempts_left: int) -> LoopOutcome:
+        if self._wait_until_match(
+            detector=self.config.press_start_detector,
+            timeout=self.config.step_timeout,
+            label='Waiting for "press_start" after startup timeout',
+        ):
+            return self._run_from_start_scene(recovery_attempts_left)
+        return self._handle_timeout(
+            'Timed out waiting for "press_start" after startup detection timeout.',
+            recovery_attempts_left,
+        )
+
     def _run_from_start_scene(self, recovery_attempts_left: int) -> LoopOutcome:
         stage_name = self._mash_until_any_match(
             button=Button.A,
             candidates=[
                 ("continue", self.config.select_save_detector),
+                ("previously", self.config.previously_detector),
                 ("ready", self.config.ready_detector),
                 ("target_failed", self.config.target_failed_detector),
                 ("target_ok", self.config.target_ok_detector),
             ],
             timeout=self.config.step_timeout,
-            label='Mashing A until "continue" appears',
+            label='Mashing A until "continue" or "previously" appears',
             primary_name="continue",
             post_press_poll_gap=self.config.startup_continue_poll_gap,
         )
         if stage_name is None:
             return self._handle_timeout(
-                'Timed out while mashing A for "continue".',
+                'Timed out while mashing A for "continue" or "previously".',
                 recovery_attempts_left,
             )
         if stage_name == "continue":
             return self._run_from_continue(recovery_attempts_left)
+        if stage_name == "previously":
+            return self._run_from_previously(recovery_attempts_left)
         return self._resume_from_recovery_stage(
             stage_name,
             recovery_attempts_left,
-            detail=f'Opener advanced to "{stage_name}" while waiting for "continue".',
+            detail=f'Opener advanced to "{stage_name}" while waiting for "continue" or "previously".',
         )
 
     def _run_from_continue(self, recovery_attempts_left: int) -> LoopOutcome:
@@ -578,36 +589,27 @@ class CameraLoopRunner:
                 'Timed out while mashing B after "continue" for "ready".',
                 recovery_attempts_left,
             )
-        return self._run_from_black_screen(recovery_attempts_left)
+        return self._run_from_ready(recovery_attempts_left)
 
     def _run_from_previously(self, recovery_attempts_left: int) -> LoopOutcome:
-        if not self._mash_until_missing(
+        stage_name = self._mash_until_any_match(
             button=Button.B,
-            detector=self.config.previously_detector,
+            candidates=[
+                ("ready", self.config.ready_detector),
+            ],
             timeout=self.config.step_timeout,
-            label='Mashing B until "previously" disappears',
-        ):
+            label='Mashing B after "previously" until "ready" appears',
+            primary_name="ready",
+            press_first=True,
+        )
+        if stage_name is None:
             return self._handle_timeout(
-                'Timed out while mashing B to dismiss "previously".',
+                'Timed out while mashing B after "previously" for "ready".',
                 recovery_attempts_left,
             )
-
         return self._run_from_ready(recovery_attempts_left)
 
     def _run_from_ready(self, recovery_attempts_left: int) -> LoopOutcome:
-        if not self._wait_until_match(
-            detector=self.config.ready_detector,
-            timeout=self.config.step_timeout,
-            label='Waiting for the "ready" scene after "previously"',
-        ):
-            return self._handle_timeout(
-                'Timed out waiting for the "ready" scene after "previously".',
-                recovery_attempts_left,
-            )
-
-        return self._run_from_black_screen(recovery_attempts_left)
-
-    def _run_from_black_screen(self, recovery_attempts_left: int) -> LoopOutcome:
         if not self._mash_until_missing(
             button=Button.A,
             detector=self.config.ready_detector,
@@ -651,11 +653,12 @@ class CameraLoopRunner:
         self._abort_if_control_requested()
         self._set_preview_boxes(
             step=label,
-            detail='Scanning launch, press start, and continue ROIs.',
+            detail='Scanning launch, press start, continue, and previously ROIs.',
             boxes=[
                 self._box_for_roi("game_launch", self.config.start_detector.roi, matched=False),
                 self._box_for_roi("press_start", self.config.press_start_detector.roi, matched=False),
                 self._box_for_roi("continue", self.config.select_save_detector.roi, matched=False),
+                self._box_for_roi("previously", self.config.previously_detector.roi, matched=False),
             ],
         )
         deadline = time.monotonic() + max(0.0, float(timeout))
@@ -677,11 +680,13 @@ class CameraLoopRunner:
             start_result = results["game_launch"]
             press_start_result = results["press_start"]
             select_result = results["continue"]
+            previously_result = results["previously"]
             detail = (
                 "No known start scene matched yet. "
                 f"launch={start_result.score:.4f} "
                 f"press_start={press_start_result.score:.4f} "
-                f'continue={select_result.score:.4f}'
+                f'continue={select_result.score:.4f} '
+                f'previously={previously_result.score:.4f}'
             )
             self._set_preview_boxes(
                 step=label,
@@ -690,15 +695,40 @@ class CameraLoopRunner:
                     self._box_for_roi("game_launch", self.config.start_detector.roi, matched=False),
                     self._box_for_roi("press_start", self.config.press_start_detector.roi, matched=False),
                     self._box_for_roi("continue", self.config.select_save_detector.roi, matched=False),
+                    self._box_for_roi("previously", self.config.previously_detector.roi, matched=False),
                 ],
             )
-            if best_match is None or start_result.score < best_match.result.score:
-                best_match = RecoveryStageMatch(
-                    name="game_launch",
-                    detector=self.config.start_detector,
-                    result=start_result,
-                    detail=f'game_launch (score={start_result.score:.4f})',
-                )
+            closest = min(
+                (
+                    RecoveryStageMatch(
+                        name="game_launch",
+                        detector=self.config.start_detector,
+                        result=start_result,
+                        detail=f'game_launch (score={start_result.score:.4f})',
+                    ),
+                    RecoveryStageMatch(
+                        name="press_start",
+                        detector=self.config.press_start_detector,
+                        result=press_start_result,
+                        detail=f'press_start (score={press_start_result.score:.4f})',
+                    ),
+                    RecoveryStageMatch(
+                        name="continue",
+                        detector=self.config.select_save_detector,
+                        result=select_result,
+                        detail=f'continue (score={select_result.score:.4f})',
+                    ),
+                    RecoveryStageMatch(
+                        name="previously",
+                        detector=self.config.previously_detector,
+                        result=previously_result,
+                        detail=f'previously (score={previously_result.score:.4f})',
+                    ),
+                ),
+                key=lambda candidate: candidate.result.score,
+            )
+            if best_match is None or closest.result.score < best_match.result.score:
+                best_match = closest
             time.sleep(self.config.match_poll_interval)
 
         if best_match is not None:
@@ -713,6 +743,7 @@ class CameraLoopRunner:
     def _scan_start_scene(self, frame) -> tuple[RecoveryStageMatch | None, dict[str, MatchResult]]:
         checks = [
             ("continue", self.config.select_save_detector),
+            ("previously", self.config.previously_detector),
             ("press_start", self.config.press_start_detector),
             ("game_launch", self.config.start_detector),
         ]
@@ -839,10 +870,7 @@ class CameraLoopRunner:
 
             print(f"  {self._format_detector_result(active_detector, result)}")
             if matched:
-                if primary_name is None or name == primary_name:
-                    self._set_preview_detector(step=label, detector=active_detector, result=result)
-                elif primary_detector is not None and primary_result is not None:
-                    self._set_preview_detector(step=label, detector=primary_detector, result=primary_result)
+                self._set_preview_detector(step=label, detector=active_detector, result=result)
                 print(f'  matched "{name}"')
                 return name
             if best_result is None or result.score < best_result.score:
@@ -1160,6 +1188,7 @@ class CameraLoopRunner:
                         result=failed,
                         detail=f"Matched for {failed_for:.1f}s; confirming retry.",
                     )
+                    self.stats.record_target_failed_retry()
                     self._remember_failed_roi(frame, failed)
                     self._save_failed_roi(frame, failed)
                     return LoopOutcome(
@@ -1410,7 +1439,6 @@ class CameraLoopRunner:
 
         for name, detector in (
             ("ready", self.config.ready_detector),
-            ("previously", self.config.previously_detector),
             ("continue", self.config.select_save_detector),
             ("press_start", self.config.press_start_detector),
         ):
@@ -1434,6 +1462,7 @@ class CameraLoopRunner:
     ) -> LoopOutcome:
         print(detail)
         if stage_name == "target_failed":
+            self.stats.record_target_failed_retry()
             frame = self.capture.get_frame()
             failed = self.config.target_failed_detector.match(frame)
             if failed.matched:
@@ -1454,10 +1483,7 @@ class CameraLoopRunner:
             )
 
         if stage_name == "ready":
-            return self._run_from_black_screen(recovery_attempts_left)
-
-        if stage_name == "previously":
-            return self._run_from_previously(recovery_attempts_left)
+            return self._run_from_ready(recovery_attempts_left)
 
         if stage_name == "continue":
             return self._run_from_continue(recovery_attempts_left)
