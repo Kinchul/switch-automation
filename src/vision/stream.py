@@ -119,6 +119,7 @@ class OverlayBox:
 class OverlayState:
     lines: list[str] = field(default_factory=list)
     boxes: list[OverlayBox] = field(default_factory=list)
+    bottom_right_lines: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -206,7 +207,7 @@ class MjpegPreviewServer:
 
 
 def _draw_overlay(frame, overlay: OverlayState):
-    if not overlay.lines and not overlay.boxes:
+    if not overlay.lines and not overlay.boxes and not overlay.bottom_right_lines:
         return frame
 
     from PIL import Image, ImageDraw, ImageFont
@@ -244,7 +245,47 @@ def _draw_overlay(frame, overlay: OverlayState):
             draw.text((box[0] + padding_x, y), line, font=font, fill=(255, 255, 255, 255))
             y += (bbox[3] - bbox[1]) + line_gap
 
+    if overlay.bottom_right_lines:
+        _draw_corner_lines(
+            draw,
+            overlay.bottom_right_lines,
+            font=font,
+            frame_width=frame.shape[1],
+            frame_height=frame.shape[0],
+            anchor="bottom_right",
+        )
+
     return np.ascontiguousarray(image)
+
+
+def _draw_corner_lines(draw, lines: list[str], *, font, frame_width: int, frame_height: int, anchor: str) -> None:
+    font_size = getattr(font, "size", 24)
+    padding_x = max(14, font_size // 2)
+    padding_y = max(10, font_size // 3)
+    line_gap = max(6, font_size // 5)
+
+    line_boxes = [draw.textbbox((0, 0), line, font=font) for line in lines]
+    text_width = max((box[2] - box[0]) for box in line_boxes)
+    text_height = sum((box[3] - box[1]) for box in line_boxes) + line_gap * (len(lines) - 1)
+    box_width = text_width + padding_x * 2
+    box_height = text_height + padding_y * 2
+
+    if anchor == "bottom_right":
+        box = (
+            max(12, frame_width - box_width - 12),
+            max(12, frame_height - box_height - 12),
+            frame_width - 12,
+            frame_height - 12,
+        )
+    else:
+        box = (12, 12, 12 + box_width, 12 + box_height)
+
+    draw.rounded_rectangle(box, radius=10, fill=(0, 0, 0, 160), outline=(255, 255, 255, 64))
+
+    y = box[1] + padding_y
+    for line, bbox in zip(lines, line_boxes, strict=False):
+        draw.text((box[0] + padding_x, y), line, font=font, fill=(255, 255, 255, 255))
+        y += (bbox[3] - bbox[1]) + line_gap
 
 
 def _draw_boxes(draw, boxes: list[OverlayBox], *, font, frame_width: int, frame_height: int) -> None:

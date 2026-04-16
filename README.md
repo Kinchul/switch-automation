@@ -1,224 +1,153 @@
 # Switch-Automation
 
-Goal: Automate a Nintendo Switch from a Raspberry Pi by:
+Automate a Nintendo Switch from a Raspberry Pi by separating:
 
-- sending controller input through a modern Bluetooth backend
-- reading game state from camera frames
-- running hunt logic in one automation loop
+- `control`: Bluetooth button input
+- `vision`: camera capture plus static-image matching
+- `sequence`: JSON-defined automation flows
 
-## Project layout
+The active sequence files live in `sequences/`. The default one is [sulfura.json](</c:/Users/vkind/Documents/GitHub/switch-automation/sequences/sulfura.json>).
+
+## Project Layout
 
 - `src/control/`
-  Bluetooth controller backends. The default path is an `NXBT` wrapper.
-- `src/automation/`
-  High-level hunt loops, macros, and decision logic.
+  Controller backends. The default backend is `NXBT`.
 - `src/vision/`
-  CSI camera capture plus future state-detection helpers.
-- `scripts/camera_debug.py`
-  Camera helper for snapshots, sample collection, and a VLC-viewable TCP preview feed.
-- `scripts/roi_picker.py`
-  Small GUI helper to draw an ROI on a saved snapshot and print `{x, y, width, height}`.
+  Camera capture, static-image detector, and preview streaming.
+- `src/automation/sequence.py`
+  Sequence JSON loading plus defaults merging.
+- `src/automation/persistence.py`
+  Persisted selected sequence plus per-sequence stats.
+- `src/automation/camera_loop.py`
+  Generic sequence runner.
+- `sequences/`
+  Automation JSON files.
 - `scripts/run_camera_loop.py`
-  First camera-guided automation loop using saved reference images plus a black-screen detector.
-- `scripts/keyboard_control.py`
-  Working terminal controller built on `NXBT` and `curses`, with arrow-key support and clean shutdown handling.
-- `scripts/pair_switch.py`
-  Pairing helper for first-time setup. It automatically sends `L` + `R` after the controller appears on the Switch pairing screen.
-- `tools/nxbt/`
-  Vendored local copy of `NXBT`, kept in-tree for now with the local Bluetooth compatibility fixes used by this project.
-- `tools/bdaddr/`
-  Vendored local `bdaddr` utility source used to inspect or restore the Pi Bluetooth MAC address when needed. This stays as a normal directory in the repo, not a submodule.
-- `System-changes.md`
-  Notes for the machine-level Bluetooth and environment changes made on the Raspberry Pi outside normal project code.
+  Foreground service and control actions.
 
-## Quick start
+## Service Commands
 
-Create the local package in editable mode:
+Start the service:
 
 ```bash
-source .venv/bin/activate
-python -m pip install -e .
+./.venv/bin/python scripts/run_camera_loop.py --action run
 ```
 
-If you want the control backend available from the local checkout:
+Pair the controller:
 
 ```bash
-python -m pip install -e ./tools/nxbt
+./.venv/bin/python scripts/run_camera_loop.py --action pair
 ```
 
-Run the CLI help:
+Trigger the selected sequence:
 
 ```bash
-switch-automation --help
+./.venv/bin/python scripts/run_camera_loop.py --action restart
 ```
 
-For an immediate manual control test from the terminal:
+Stop the service:
 
 ```bash
-sudo ./.venv/bin/python scripts/keyboard_control.py
+./.venv/bin/python scripts/run_camera_loop.py --action stop
 ```
 
-If you want to force first-time pairing through `Change Grip/Order`:
-
-```bash
-sudo ./.venv/bin/python scripts/keyboard_control.py --pairing-menu
-```
-
-To run the dedicated pairing helper:
-
-```bash
-sudo ./.venv/bin/python scripts/pair_switch.py
-```
-
-To save a camera snapshot from the CSI camera:
-
-```bash
-./.venv/bin/python scripts/camera_debug.py snapshot --output debug/camera/snapshot.jpg
-```
-
-To collect a small batch of sample frames:
-
-```bash
-./.venv/bin/python scripts/camera_debug.py sample --output-dir debug/camera/samples --count 20 --interval 1.0
-```
-
-To start a VLC-viewable TCP preview feed:
-
-```bash
-./.venv/bin/python scripts/camera_debug.py stream --width 1920 --height 1080 --fps 20
-```
-
-Then open `tcp/h264://PI_IP:8888` in VLC from another machine.
-
-To draw an ROI on a saved snapshot:
-
-```bash
-./.venv/bin/python scripts/roi_picker.py debug/camera/snapshot.jpg
-```
-
-Drag a box over the important part of the image. The script prints ROI coordinates as JSON.
-
-To run the first camera-guided loop:
-
-```bash
-sudo ./.venv/bin/python scripts/run_camera_loop.py --width 1920 --height 1080 --fps 20
-```
-
-To run it as a boot-time `systemd` service instead:
-
-```bash
-sudo install -m 644 systemd/switch-camera-loop.service /etc/systemd/system/switch-camera-loop.service
-sudo install -m 644 systemd/switch-camera-loop.env.example /etc/default/switch-camera-loop
-sudo systemctl daemon-reload
-sudo systemctl enable --now switch-camera-loop.service
-```
-
-Adjust `/etc/default/switch-camera-loop` for your repo path, mail settings, or runner flags.
-
-Useful service commands:
-
-```bash
-sudo systemctl status switch-camera-loop.service
-sudo journalctl -u switch-camera-loop.service -f
-sudo systemctl restart switch-camera-loop.service
-sudo systemctl stop switch-camera-loop.service
-```
-
-This runner starts in stopped mode and immediately starts the camera preview feed. The Bluetooth controller is only connected when a loop is triggered.
-
-Preview feed while the service is running:
-
-```text
-http://PI_IP:8080/stream.mjpg
-```
-
-You can open that URL in VLC or a browser. `restart` and `stop` only affect the control logic; the feed keeps running until the foreground service exits.
-
-Trigger a new loop:
-
-```bash
-sudo ./.venv/bin/python scripts/run_camera_loop.py --action restart
-```
-
-If the controller is not connected yet, use `--action pair` while the Switch is on "Change Grip/Order". Once paired, future restarts reuse that active connection.
-
-```bash
-sudo ./.venv/bin/python scripts/run_camera_loop.py --action run --width 1920 --height 1080 --fps 20
-```
-
-After pairing, return the game to the state where `A+B+X+Y` should trigger the next loop, then use `--action restart`.
-
-Stop the service and leave it idle:
-
-```bash
-sudo ./.venv/bin/python scripts/run_camera_loop.py --action stop
-```
-
-Inspect the current command/timers/counter:
+Show status:
 
 ```bash
 ./.venv/bin/python scripts/run_camera_loop.py --action status
 ```
 
-## Local PC workflow
+List sequences:
 
-From a Windows PC, you can sync the repo to the Pi without committing every tweak.
-
-Set the defaults once inside [`scripts/pi_sync.ps1`](</c:/Users/vkind/Documents/GitHub/switch-automation/scripts/pi_sync.ps1>) by editing:
-
-```powershell
-$DefaultHost = "pi@YOUR_PI_HOSTNAME_OR_IP"
-$DefaultRemoteDir = "switch-automation"
+```bash
+./.venv/bin/python scripts/run_camera_loop.py --action list-sequences
 ```
 
-Sync the current checkout to the Pi with `scp`:
+Select a sequence:
 
-```powershell
-.\scripts\pi_sync.ps1
+```bash
+./.venv/bin/python scripts/run_camera_loop.py --action select-sequence --sequence sulfura
 ```
 
-You can still override either value for a one-off run:
+Reset all per-sequence stats:
 
-```powershell
-.\scripts\pi_sync.ps1 -PiHost pi@192.168.1.50 -RemoteDir switch-automation
+```bash
+./.venv/bin/python scripts/run_camera_loop.py --action reset-stats
 ```
 
-Use `-DryRun` if you want to preview the file list without uploading:
+## Sequence Format
 
-```powershell
-.\scripts\pi_sync.ps1 -DryRun
-```
+Sequence id:
 
-The sync script uses Windows OpenSSH `scp`, so no WSL or extra install is required. It uploads the filtered repo contents, but it does not delete files that already exist on the Pi and were removed locally.
+- The filename is the sequence id.
+- `sulfura.json` becomes `sulfura`.
 
-The runner currently:
-- confirms the start scene from the launch or press-start screens
-- presses `A` until the saved `select save` reference appears
-- presses `A` once to skip that screen
-- presses `B` until the saved `previously` reference disappears
-- waits for the saved `ready` reference after `previously` disappears
-- presses `A` until a black-screen transition is detected
-- waits for either the saved `target failed` image or a non-black success candidate
-- if the target failed image appears, sends `A+B+X+Y` together to trigger the next loop
+Top-level fields:
 
-If no failure image appears after the black transition, the script stops and saves the outcome frame under `debug/camera/outcomes/`.
+- `recovery`: object. States the runner can detect during timeout recovery.
+- `defaults`: object. Shared values applied to every state unless the state overrides them.
+- `states`: object. Ordered state map. The first state is the normal start state.
 
-When `target_ok` is the reason the run stops, the runner also saves a short burst of pre/post frames under `debug/camera/target_ok_events/`. Each event folder contains:
-- full-frame JPEGs
-- target ROI crops for each frame
-- `metadata.json` with timestamps and detector scores
+`recovery` fields:
 
-This is meant to make future detector work easier for short animations like stars without changing the current success logic.
+- `states`: string array. Ordered list of states scanned when a timeout triggers recovery.
+- `timeout_ms`: integer. How long timeout recovery scanning lasts. `0` means one immediate scan.
 
-The runner also persists loop stats in `debug/camera/loop_stats.json`:
-- total elapsed time across loops
-- current active loop elapsed time
-- confirmed target-failed counter
+`defaults` fields:
 
-Those stats survive software restarts so the timers and count resume cleanly. The control command file lives at `debug/camera/loop_control.json`.
+- `timeout_ms`: integer. Default timeout for each state.
+- `scene`: object. Default scene tuning for all states with a scene.
+- `action`: object. Default button timing for all actions.
 
-## Near-term plan
+`defaults.scene` fields:
 
-1. Use `NXBT` for reliable button presses and macros.
-2. Read frames from the CSI camera mounted in front of the Switch display.
-3. Tune the static-image thresholds and replace the current success-candidate fallback with a real success detector.
+- `threshold`: number. Optional default match threshold.
+- `search_margin`: integer.
+- `stride`: integer.
+- `search_step`: integer.
+- `hold_ms`: integer. How long a match must remain visible before the state is accepted.
+
+`defaults.action` fields:
+
+- `frequency_hz`: number. `0` means one press, `> 0` means repeated presses.
+- `down_ms`: integer.
+- `up_ms`: integer.
+
+State fields:
+
+- `scene`: object or empty. If omitted, the state is procedural and runs immediately when entered.
+- `next_states`: string or string array. Ordered next states.
+- `action`: object or empty. Button action to perform in that state.
+- `timeout_ms`: integer. Overrides `defaults.timeout_ms`.
+- `notification`: string. Accepted values: `""` and `"mail"`.
+
+Scene fields:
+
+- `image_path`: string. Relative to the JSON file.
+  Full-screen screenshots are preferred. Cropped template images also work; the detector anchors the whole template at the configured `roi.x` and `roi.y`.
+- `roi`: object with `x`, `y`, `width`, `height`.
+- `threshold`: number. Optional if supplied by `defaults.scene`.
+- `search_margin`: integer.
+- `stride`: integer.
+- `search_step`: integer.
+- `hold_ms`: integer.
+
+Action fields:
+
+- `buttons`: string array.
+- `frequency_hz`: number.
+- `down_ms`: integer.
+- `up_ms`: integer.
+
+Accepted button values:
+
+- `A`, `B`, `X`, `Y`, `L`, `R`, `ZL`, `ZR`, `PLUS`, `MINUS`, `HOME`, `CAPTURE`, `DPAD_UP`, `DPAD_DOWN`, `DPAD_LEFT`, `DPAD_RIGHT`
+
+## Notes
+
+- The first state in `states` is the normal loop start.
+- `recovery.states` is only used after a timeout.
+- A state with no `scene` is a procedural step. This is used in the default sequence to split "press A once, then mash B" into two states without extra schema fields.
+- Terminal states are states with no `next_states`. The runner stops there.
+- Per-sequence stats are stored in `debug/camera/loop_stats.json`.
+- The selected sequence is stored in `debug/camera/loop_control.json`.

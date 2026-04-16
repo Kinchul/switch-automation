@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock, Thread
 from time import sleep
 from typing import Any
 
@@ -49,7 +49,12 @@ class CameraCapture:
     fps: int = 20
     warmup: float = 2.0
     _camera: Any | None = field(init=False, default=None, repr=False)
-    _lock: Lock = field(init=False, default_factory=Lock, repr=False)
+    _frame_lock: Lock = field(init=False, default_factory=Lock, repr=False)
+    _latest_frame: Any | None = field(init=False, default=None, repr=False)
+    _reader_thread: Thread | None = field(init=False, default=None, repr=False)
+    _stop_event: Event = field(init=False, default_factory=Event, repr=False)
+    _frame_ready: Event = field(init=False, default_factory=Event, repr=False)
+    _last_error: str | None = field(init=False, default=None, repr=False)
 
     def start(self) -> CameraCapture:
         if self._camera is not None:
@@ -89,12 +94,24 @@ class CameraCapture:
             sleep(self.warmup)
 
         self._camera = camera
+        self._stop_event.clear()
+        self._frame_ready.clear()
+        self._latest_frame = None
+        self._reader_thread = Thread(target=self._reader_loop, name="camera-capture", daemon=True)
+        self._reader_thread.start()
         return self
 
     def get_frame(self):
         self._require_started()
-        with self._lock:
-            return _to_rgb_frame(self._camera.capture_array("main"))
+        if not self._frame_ready.wait(timeout=max(1.0, self.warmup + 1.0)):
+            detail = self._last_error or "Timed out waiting for the first camera frame."
+            raise RuntimeError(detail)
+        with self._frame_lock:
+            frame = self._latest_frame
+        if frame is None:
+            detail = self._last_error or "Camera frame cache is empty."
+            raise RuntimeError(detail)
+        return frame
 
     def save_frame(self, output_path: str | Path, quality: int = 95) -> Path:
         path = Path(output_path)
@@ -106,16 +123,41 @@ class CameraCapture:
         if self._camera is None:
             return
 
+        self._stop_event.set()
+        self._frame_ready.set()
+        reader = self._reader_thread
+        self._reader_thread = None
+        if reader is not None:
+            reader.join(timeout=2.0)
+
         camera = self._camera
         self._camera = None
         try:
             camera.stop()
         finally:
             camera.close()
+        with self._frame_lock:
+            self._latest_frame = None
 
     def _require_started(self) -> None:
         if self._camera is None:
             raise RuntimeError("Camera is not running. Call start() first.")
+
+    def _reader_loop(self) -> None:
+        retry_delay = 0.05
+        while not self._stop_event.is_set():
+            camera = self._camera
+            if camera is None:
+                return
+            try:
+                frame = _to_rgb_frame(camera.capture_array("main"))
+                with self._frame_lock:
+                    self._latest_frame = frame
+                self._last_error = None
+                self._frame_ready.set()
+            except Exception as exc:
+                self._last_error = f"Camera capture error: {exc}"
+                sleep(retry_delay)
 
 
 def open_capture(

@@ -1,0 +1,199 @@
+{
+  "recovery": {
+    "states": [
+      "target_failed",
+      "target_ok",
+      "ready",
+      "continue",
+      "previously",
+      "press_start",
+      "game_launch"
+    ],
+    "timeout_ms": 1000
+  },
+  "defaults": {
+    "timeout_ms": 45000,
+    "scene": {
+      "search_margin": 40,
+      "stride": 4,
+      "search_step": 2,
+      "hold_ms": 0
+    },
+    "action": {
+      "frequency_hz": 5.0,
+      "down_ms": 50,
+      "up_ms": 150
+    }
+  },
+  "states": {
+    "game_launch": {
+      "scene": {
+        "image_path": "../images/0_game_launch.png",
+        "roi": {
+          "x": 610,
+          "y": 373,
+          "width": 669,
+          "height": 334
+        },
+        "threshold": 0.12,
+        "stride": 6,
+        "search_step": 4
+      },
+      "next_states": [
+        "press_start"
+      ],
+      "action": {
+        "buttons": [
+          "A"
+        ]
+      }
+    },
+    "press_start": {
+      "scene": {
+        "image_path": "../images/1_press_start.png",
+        "roi": {
+          "x": 419,
+          "y": 169,
+          "width": 763,
+          "height": 295
+        },
+        "threshold": 0.12,
+        "stride": 6,
+        "search_step": 4
+      },
+      "next_states": [
+        "continue",
+        "previously",
+        "ready"
+      ],
+      "action": {
+        "buttons": [
+          "A"
+        ]
+      }
+    },
+    "continue": {
+      "scene": {
+        "image_path": "../images/2_select_save.png",
+        "roi": {
+          "x": 479,
+          "y": 198,
+          "width": 302,
+          "height": 72
+        },
+        "threshold": 0.08,
+        "stride": 2,
+        "search_step": 2
+      },
+      "next_states": [
+        "continue_to_ready"
+      ],
+      "action": {
+        "buttons": [
+          "A"
+        ],
+        "frequency_hz": 0
+      }
+    },
+    "continue_to_ready": {
+      "next_states": [
+        "ready"
+      ],
+      "action": {
+        "buttons": [
+          "B"
+        ]
+      }
+    },
+    "previously": {
+      "scene": {
+        "image_path": "../images/3_previously.png",
+        "roi": {
+          "x": 384,
+          "y": 151,
+          "width": 650,
+          "height": 85
+        },
+        "threshold": 0.08,
+        "stride": 2,
+        "search_step": 2
+      },
+      "next_states": [
+        "ready"
+      ],
+      "action": {
+        "buttons": [
+          "B"
+        ]
+      }
+    },
+    "ready": {
+      "scene": {
+        "image_path": "../images/4_ready.png",
+        "roi": {
+          "x": 838,
+          "y": 384,
+          "width": 200,
+          "height": 233
+        },
+        "threshold": 0.16,
+        "search_margin": 24,
+        "stride": 8,
+        "search_step": 4
+      },
+      "next_states": [
+        "target_failed",
+        "target_ok"
+      ],
+      "action": {
+        "buttons": [
+          "A"
+        ]
+      }
+    },
+    "target_failed": {
+      "scene": {
+        "image_path": "../images/6_target_failed.png",
+        "roi": {
+          "x": 1040,
+          "y": 186,
+          "width": 381,
+          "height": 337
+        },
+        "threshold": 0.07,
+        "search_margin": 24,
+        "hold_ms": 800
+      },
+      "next_states": [
+        "game_launch"
+      ],
+      "action": {
+        "buttons": [
+          "A",
+          "B",
+          "X",
+          "Y"
+        ],
+        "frequency_hz": 0,
+        "down_ms": 150,
+        "up_ms": 1500
+      }
+    },
+    "target_ok": {
+      "scene": {
+        "image_path": "../images/target_ok.png",
+        "roi": {
+          "x": 1040,
+          "y": 186,
+          "width": 381,
+          "height": 337
+        },
+        "threshold": 0.16,
+        "search_margin": 24,
+        "hold_ms": 800
+      },
+      "next_states": [],
+      "notification": "mail"
+    }
+  }
+}

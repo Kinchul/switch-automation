@@ -5,7 +5,8 @@ After=network-online.target bluetooth.service switch-bt-finalize.service
 
 [Service]
 Type=simple
-User=root
+User=vkindschi
+Group=vkindschi
 WorkingDirectory=/home/vkindschi/switch-automation
 Environment=PYTHONUNBUFFERED=1
 Environment=SWITCH_AUTOMATION_DIR=/home/vkindschi/switch-automation

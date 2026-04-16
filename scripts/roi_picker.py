@@ -26,11 +26,39 @@ class Roi:
         }
 
 
+def build_scene_dict(
+    roi: Roi,
+    *,
+    image_path: str | None,
+    threshold: float | None,
+) -> dict[str, object]:
+    scene: dict[str, object] = {
+        "roi": roi.to_dict(),
+    }
+    if image_path:
+        scene["image_path"] = image_path
+    if threshold is not None:
+        scene["threshold"] = threshold
+    return {"scene": scene}
+
+
 class RoiPicker:
-    def __init__(self, image_path: Path, max_width: int, max_height: int):
+    def __init__(
+        self,
+        image_path: Path,
+        max_width: int,
+        max_height: int,
+        *,
+        output_format: str,
+        scene_image_path: str | None,
+        scene_threshold: float | None,
+    ):
         self.image_path = image_path
         self.max_width = max_width
         self.max_height = max_height
+        self.output_format = output_format
+        self.scene_image_path = scene_image_path
+        self.scene_threshold = scene_threshold
 
         source = Image.open(image_path).convert("RGB")
         scale = min(max_width / source.width, max_height / source.height, 1.0)
@@ -135,7 +163,22 @@ class RoiPicker:
             self.clear_selection()
             return
         self.roi_var.set(f"ROI: {roi.to_dict()}")
-        print(json.dumps(roi.to_dict()))
+        self._print_output(roi)
+
+    def _print_output(self, roi: Roi) -> None:
+        if self.output_format in {"roi", "both"}:
+            print(json.dumps(roi.to_dict(), indent=2))
+        if self.output_format in {"scene", "both"}:
+            print(
+                json.dumps(
+                    build_scene_dict(
+                        roi,
+                        image_path=self.scene_image_path,
+                        threshold=self.scene_threshold,
+                    ),
+                    indent=2,
+                )
+            )
 
     def _display_roi_to_source(self, x0: int, y0: int, x1: int, y1: int) -> Roi:
         left = min(x0, x1)
@@ -163,7 +206,7 @@ class RoiPicker:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Draw an ROI on a saved camera snapshot and print source-image coordinates."
+        description="Draw an ROI on a saved camera snapshot and print ROI JSON or a paste-ready scene block."
     )
     parser.add_argument("image", type=Path, help="Path to a saved snapshot image.")
     parser.add_argument(
@@ -178,6 +221,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=900,
         help="Maximum height of the displayed image window.",
     )
+    parser.add_argument(
+        "--output-format",
+        choices=["roi", "scene", "both"],
+        default="roi",
+        help="Choose whether to print just the ROI, a scene object, or both.",
+    )
+    parser.add_argument(
+        "--image-path",
+        type=str,
+        default=None,
+        help="image_path value to include when printing scene JSON.",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Optional threshold value to include when printing scene JSON.",
+    )
     return parser
 
 
@@ -185,7 +246,14 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    picker = RoiPicker(args.image, max_width=args.max_width, max_height=args.max_height)
+    picker = RoiPicker(
+        args.image,
+        max_width=args.max_width,
+        max_height=args.max_height,
+        output_format=args.output_format,
+        scene_image_path=args.image_path,
+        scene_threshold=args.threshold,
+    )
     picker.run()
     return 0
 
