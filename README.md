@@ -45,6 +45,12 @@ Trigger the selected sequence:
 ./.venv/bin/python scripts/run_camera_loop.py --action restart
 ```
 
+Force a game reset and then start the selected sequence without the startup recovery scan:
+
+```bash
+./.venv/bin/python scripts/run_camera_loop.py --action reset
+```
+
 Stop the service:
 
 ```bash
@@ -119,6 +125,8 @@ State fields:
 - `next_states`: string or string array. Ordered next states.
 - `action`: object or empty. Button action to perform in that state.
 - `timeout_ms`: integer. Overrides `defaults.timeout_ms`.
+- `decision_mode`: string. Optional. Accepted values: `""` and `"best_score"`.
+- `decision_margin`: number. Optional minimum score gap required by `decision_mode: "best_score"`.
 - `notification`: string. Accepted values: `""` and `"mail"`.
 
 Scene fields:

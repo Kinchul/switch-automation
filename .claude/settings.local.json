@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs wc *)",
+      "Bash(ssh -o StrictHostKeyChecking=no vkindschi@192.168.1.181 \"echo connected && ls ~\")",
+      "Bash(ssh vkindschi@192.168.1.181 \"cd ~/switch-automation && git log --oneline -5 && echo '---' && git status --short\")",
+      "Bash(ssh vkindschi@192.168.1.181 \"systemctl status switch-camera-loop 2>&1 | head -30\")",
+      "Bash(ssh vkindschi@192.168.1.181 \"journalctl -u switch-camera-loop --no-pager -n 150\")",
+      "Bash(ssh vkindschi@192.168.1.181 \"grep -n 'def macro\\\\|block=True\\\\|block\\\\s*=\\\\s*True\\\\|macro_id\\\\|_macro_thread\\\\|_macro_state\\\\|macro_complete' ~/switch-automation/tools/nxbt/nxbt/nxbt.py | head -40\")",
+      "Bash(ssh vkindschi@192.168.1.181 \"sed -n '313,365p' ~/switch-automation/tools/nxbt/nxbt/nxbt.py\")",
+      "Bash(ssh vkindschi@192.168.1.181 \"sed -n '340,395p' ~/switch-automation/tools/nxbt/nxbt/nxbt.py\")",
+      "Bash(ssh vkindschi@192.168.1.181 \"cd ~/switch-automation && git show 75c87563 --stat && echo '---' && git show 75c87563 -- tools/nxbt/nxbt/nxbt.py | head -60\")"
+    ]
+  }
+}

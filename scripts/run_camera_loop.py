@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
             "run",
             "pair",
             "restart",
+            "reset",
             "stop",
             "status",
             "select-sequence",
@@ -46,8 +47,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="run",
         help=(
             "`run` starts the foreground service, `pair` connects the controller and waits idle, "
-            "`restart` triggers a new loop, `stop` idles the service, `status` prints control and "
-            "stats, `select-sequence` persists the sequence to use on the next restart, "
+            "`restart` triggers a new loop, `reset` forces a game reset then starts a new loop, "
+            "`stop` idles the service, `status` prints control and stats, `select-sequence` "
+            "persists the sequence to use on the next restart, "
             "`reset-stats` clears all per-sequence stats, and `list-sequences` lists the available JSON files."
         ),
     )
@@ -236,6 +238,11 @@ def _handle_control_action(args: argparse.Namespace) -> int:
         print(f"Requested restart via {args.control_file}")
         return 0
 
+    if normalized_action == "reset":
+        control.set_command("reset")
+        print(f"Requested reset via {args.control_file}")
+        return 0
+
     if normalized_action == "stop":
         control.set_command("stop")
         print(f"Requested stop via {args.control_file}")
@@ -354,7 +361,7 @@ def main() -> int:
         print(
             "Use "
             "`./.venv/bin/python scripts/run_camera_loop.py --action pair`, "
-            "`--action restart`, `--action stop`, "
+            "`--action restart`, `--action reset`, `--action stop`, "
             "`--action select-sequence --sequence YOUR_SEQUENCE`, or "
             "`--action reset-stats` from another terminal."
         )

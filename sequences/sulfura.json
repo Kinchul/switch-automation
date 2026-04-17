@@ -2,17 +2,16 @@
   "recovery": {
     "states": [
       "target_failed",
-      "target_ok",
       "ready",
       "continue",
       "previously",
       "press_start",
       "game_launch"
     ],
-    "timeout_ms": 1000
+    "timeout_ms": 8000
   },
   "defaults": {
-    "timeout_ms": 45000,
+    "timeout_ms": 7000,
     "scene": {
       "search_margin": 40,
       "stride": 4,
@@ -39,13 +38,10 @@
         "stride": 6,
         "search_step": 4
       },
-      "next_states": [
-        "press_start"
-      ],
+      "next_states": ["press_start"],
+      "timeout_ms": 4000,
       "action": {
-        "buttons": [
-          "A"
-        ]
+        "buttons": ["A"]
       }
     },
     "press_start": {
@@ -61,15 +57,14 @@
         "stride": 6,
         "search_step": 4
       },
-      "next_states": [
-        "continue",
-        "previously",
-        "ready"
-      ],
+      "next_states": ["post_start_detect"],
+      "timeout_ms": 3000
+    },
+    "post_start_detect": {
+      "next_states": ["continue", "previously", "ready"],
+      "timeout_ms": 4000,
       "action": {
-        "buttons": [
-          "A"
-        ]
+        "buttons": ["A"]
       }
     },
     "continue": {
@@ -83,26 +78,13 @@
         },
         "threshold": 0.08,
         "stride": 2,
-        "search_step": 2
+        "search_step": 4
       },
-      "next_states": [
-        "continue_to_ready"
-      ],
+      "next_states": ["previously"],
+      "timeout_ms": 3000,
       "action": {
-        "buttons": [
-          "A"
-        ],
+        "buttons": ["B"],
         "frequency_hz": 0
-      }
-    },
-    "continue_to_ready": {
-      "next_states": [
-        "ready"
-      ],
-      "action": {
-        "buttons": [
-          "B"
-        ]
       }
     },
     "previously": {
@@ -116,16 +98,11 @@
         },
         "threshold": 0.08,
         "stride": 2,
-        "search_step": 2
+        "search_margin": 24,
+        "search_step": 4
       },
-      "next_states": [
-        "ready"
-      ],
-      "action": {
-        "buttons": [
-          "B"
-        ]
-      }
+      "next_states": ["ready"],
+      "timeout_ms": 6000
     },
     "ready": {
       "scene": {
@@ -141,14 +118,15 @@
         "stride": 8,
         "search_step": 4
       },
-      "next_states": [
-        "target_failed",
-        "target_ok"
-      ],
+      "next_states": ["target_detect"],
+      "timeout_ms": 7000
+    },
+    "target_detect": {
+      "next_states": ["target_failed"],
+      "timeout_ms": 10000,
+      "timeout_next_state": "target_ok",
       "action": {
-        "buttons": [
-          "A"
-        ]
+        "buttons": ["A"]
       }
     },
     "target_failed": {
@@ -164,20 +142,9 @@
         "search_margin": 24,
         "hold_ms": 800
       },
-      "next_states": [
-        "game_launch"
-      ],
-      "action": {
-        "buttons": [
-          "A",
-          "B",
-          "X",
-          "Y"
-        ],
-        "frequency_hz": 0,
-        "down_ms": 150,
-        "up_ms": 1500
-      }
+      "next_states": ["game_launch"],
+      "timeout_ms": 5000,
+      "reset_loop": true
     },
     "target_ok": {
       "scene": {

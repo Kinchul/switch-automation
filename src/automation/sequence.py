@@ -94,6 +94,10 @@ class StateSpec:
     next_states: tuple[str, ...]
     action: ActionSpec | None = None
     timeout_ms: int = 0
+    timeout_next_state: str | None = None
+    decision_mode: str = ""
+    decision_margin: float = 0.0
+    reset_loop: bool = False
     notification: str = ""
 
 
@@ -232,6 +236,37 @@ def _validate_sequence(definition: SequenceDefinition) -> None:
             raise SequenceConfigError(
                 f'State "{state.name}" uses unsupported notification "{state.notification}".'
             )
+        if state.decision_mode not in {"", "best_score"}:
+            raise SequenceConfigError(
+                f'State "{state.name}" uses unsupported decision_mode "{state.decision_mode}".'
+            )
+        if state.decision_margin < 0:
+            raise SequenceConfigError(
+                f'State "{state.name}" decision_margin must be non-negative.'
+            )
+        if state.decision_mode:
+            if len(state.next_states) < 2:
+                raise SequenceConfigError(
+                    f'State "{state.name}" decision_mode requires at least two next_states.'
+                )
+            for next_state in state.next_states:
+                if definition.states[next_state].scene is None:
+                    raise SequenceConfigError(
+                        f'State "{state.name}" decision_mode requires detectable next_states; "{next_state}" has no scene.'
+                    )
+        if state.timeout_next_state is not None:
+            if state.timeout_next_state not in state_names:
+                raise SequenceConfigError(
+                    f'State "{state.name}" timeout_next_state "{state.timeout_next_state}" is not defined.'
+                )
+            if state.timeout_ms <= 0:
+                raise SequenceConfigError(
+                    f'State "{state.name}" with timeout_next_state requires timeout_ms > 0.'
+                )
+        if state.reset_loop and not state.next_states:
+            raise SequenceConfigError(
+                f'State "{state.name}" reset_loop requires at least one next_state.'
+            )
 
         procedural_targets = [
             next_state
@@ -300,12 +335,17 @@ def _parse_state(
     if next_states_value is None:
         next_states_value = raw_state.get("next_state")
     next_states = tuple(_parse_state_list(next_states_value, f"{state_name}.next_states"))
+    timeout_next_state_raw = raw_state.get("timeout_next_state")
     return StateSpec(
         name=state_name,
         scene=scene,
         next_states=next_states,
         action=_parse_action(raw_state.get("action"), f"{state_name}.action", defaults.action),
         timeout_ms=_as_int(raw_state.get("timeout_ms", defaults.timeout_ms), f"{state_name}.timeout_ms"),
+        timeout_next_state=str(timeout_next_state_raw) if timeout_next_state_raw not in (None, "") else None,
+        decision_mode=str(raw_state.get("decision_mode") or ""),
+        decision_margin=float(raw_state.get("decision_margin", 0.0) or 0.0),
+        reset_loop=bool(raw_state.get("reset_loop", False)),
         notification=str(raw_state.get("notification") or ""),
     )
 

@@ -64,6 +64,10 @@ class RestartRequested(Exception):
     pass
 
 
+class ResetRequested(Exception):
+    pass
+
+
 class CameraLoopRunner:
     def __init__(
         self,
@@ -120,10 +124,19 @@ class CameraLoopRunner:
 
         try:
             self.controller.connect(
-                cancel_cb=lambda: self.control.refresh() in {"stop", "restart"},
+                cancel_cb=lambda: self.control.refresh() in {"stop", "restart", "reset"},
                 status_cb=_on_status,
             )
         except ControllerConnectCancelled:
+            requested = self._consume_pending_command()
+            if requested == "restart":
+                self._mark_current_status("stopped", last_outcome="connect_cancelled")
+                self._set_preview_state("stopped", "Controller connection cancelled for restart.", [])
+                raise RestartRequested from None
+            if requested == "reset":
+                self._mark_current_status("stopped", last_outcome="connect_cancelled")
+                self._set_preview_state("stopped", "Controller connection cancelled for reset.", [])
+                raise ResetRequested from None
             self._mark_current_status("stopped", last_outcome="connect_cancelled")
             self._set_preview_state("stopped", "Controller connection cancelled.", [])
             raise StopRequested from None
@@ -135,8 +148,10 @@ class CameraLoopRunner:
 
     def run_service(self, attempts: int = 0) -> LoopOutcome:
         print("Service is ready. Current mode: stopped.")
+        pending_command: str | None = None
         while True:
-            command = self._wait_for_command()
+            command = pending_command or self._wait_for_command()
+            pending_command = None
             if command == "stop":
                 continue
             if command == "pair":
@@ -151,16 +166,36 @@ class CameraLoopRunner:
                 print(f"Could not load the selected sequence: {exc}")
                 continue
 
-            self.connect()
+            try:
+                self.connect()
+            except StopRequested:
+                print("Stop requested while connecting the controller. Automation is now idle.")
+                continue
+            except RestartRequested:
+                print("Restart requested while connecting the controller. Starting a fresh loop.")
+                pending_command = "restart"
+                continue
+            except ResetRequested:
+                print("Reset requested while connecting the controller. Forcing a game reset next.")
+                pending_command = "reset"
+                continue
             self._latest_outcome_frame_path = None
             self._latest_state_roi_path = None
             self._entered_initial_state_once = False
             stats = self.stats.start_new_loop(runtime.sequence_id)
             self._last_checkpoint_monotonic = time.monotonic()
             self._print_timers(runtime.sequence_id, stats)
+            skip_startup_recovery = False
+            if command == "reset":
+                self._force_game_reset()
+                skip_startup_recovery = True
 
             try:
-                outcome = self.run_once(runtime, max_loops=attempts)
+                outcome = self.run_once(
+                    runtime,
+                    max_loops=attempts,
+                    skip_startup_recovery=skip_startup_recovery,
+                )
             except StopRequested:
                 snapshot = self.stats.finish_loop(runtime.sequence_id, "stopped", status="stopped")
                 self._print_timers(runtime.sequence_id, snapshot)
@@ -174,7 +209,17 @@ class CameraLoopRunner:
                 )
                 self._print_timers(runtime.sequence_id, snapshot)
                 print("Restart requested. Starting a fresh loop.")
-                self.control.set_command("restart")
+                pending_command = "restart"
+                continue
+            except ResetRequested:
+                snapshot = self.stats.finish_loop(
+                    runtime.sequence_id,
+                    "reset_requested",
+                    status="stopped",
+                )
+                self._print_timers(runtime.sequence_id, snapshot)
+                print("Reset requested. Forcing a game reset and starting a fresh loop.")
+                pending_command = "reset"
                 continue
 
             self._checkpoint_stats(force=True)
@@ -182,17 +227,28 @@ class CameraLoopRunner:
             self._print_timers(runtime.sequence_id, snapshot)
             print(f"Outcome: {outcome.status} - {outcome.detail}")
 
-    def run_once(self, runtime: SequenceRuntime, *, max_loops: int = 0) -> LoopOutcome:
+    def run_once(
+        self,
+        runtime: SequenceRuntime,
+        *,
+        max_loops: int = 0,
+        skip_startup_recovery: bool = False,
+    ) -> LoopOutcome:
         self._current_sequence_id = runtime.sequence_id
         self._abort_if_control_requested()
         self._checkpoint_stats()
-        start_match = self._wait_for_state_match(
-            runtime,
-            runtime.definition.recovery.states,
-            timeout_ms=0,
-            step="Startup recovery scan",
-            zero_timeout_is_infinite=False,
-        )
+        start_match = None
+        if not skip_startup_recovery:
+            start_match = self._wait_for_recovery_match(runtime, step="Startup recovery scan")
+            if start_match is None:
+                return self._fail_recovery(
+                    runtime,
+                    state=None,
+                    detail="Startup recovery scan failed before entering the sequence.",
+                    outcome_name="startup_recovery_failed",
+                    saved_state_name="startup-recovery",
+                    notify=False,
+                )
         if start_match is None:
             start_match = self._synthetic_state_match(runtime, runtime.definition.initial_state)
 
@@ -256,6 +312,10 @@ class CameraLoopRunner:
             self._perform_action(state.action)
             self._checkpoint_stats()
 
+        if state.reset_loop:
+            print(f'State "{state.name}" requested a forced reset loop.')
+            raise ResetRequested
+
         immediate_transition = self._immediate_transition(runtime, state)
         if immediate_transition is not None:
             return immediate_transition
@@ -278,32 +338,55 @@ class CameraLoopRunner:
             self._abort_if_control_requested()
             now = time.monotonic()
             if deadline is not None and now >= deadline:
+                if state.timeout_next_state is not None:
+                    tns = state.timeout_next_state
+                    print(f'Timeout in state "{state.name}": no {state.next_states} detected, transitioning to "{tns}".')
+                    return StateTransition(
+                        next_state=tns,
+                        match=self._synthetic_state_match(runtime, tns),
+                    )
                 return self._handle_timeout(runtime, state, f'Timeout in state "{state.name}".')
 
             frame = self.capture.get_frame()
-            transition, best_match = self._find_next_transition(
-                runtime,
-                state,
-                frame,
-                now,
-                matched_since,
-            )
+            if state.decision_mode == "best_score":
+                transition, best_match = self._find_best_score_transition(
+                    runtime,
+                    state,
+                    frame,
+                    now,
+                    matched_since,
+                )
+            else:
+                transition, best_match = self._find_next_transition(
+                    runtime,
+                    state,
+                    frame,
+                    now,
+                    matched_since,
+                )
             if transition is not None:
                 return transition
 
             if best_match is not None:
+                detail = f'Waiting for one of: {", ".join(state.next_states)}'
+                if state.decision_mode == "best_score":
+                    detail = (
+                        f'Comparing outcomes: {", ".join(state.next_states)} '
+                        f'(margin={state.decision_margin:.4f})'
+                    )
                 self._set_preview_detector(
                     step=f'State "{state.name}"',
                     detector=best_match.detector,
                     result=best_match.result,
-                    detail=f'Waiting for one of: {", ".join(state.next_states)}',
+                    detail=detail,
                 )
 
             if next_action_at is not None and now >= next_action_at and state.action is not None:
+                scheduled_at = next_action_at
+                interval = state.action.interval_seconds or 0.0
                 self._perform_action(state.action)
                 self._checkpoint_stats()
-                interval = state.action.interval_seconds or 0.0
-                next_action_at = time.monotonic() + max(interval, self.config.match_poll_interval)
+                next_action_at = scheduled_at + interval
 
             sleep_for = self.config.match_poll_interval
             if next_action_at is not None:
@@ -375,6 +458,87 @@ class CameraLoopRunner:
 
         return None, preferred_preview_match or best_match
 
+    def _find_best_score_transition(
+        self,
+        runtime: SequenceRuntime,
+        state: StateSpec,
+        frame,
+        now: float,
+        matched_since: dict[str, float | None],
+    ) -> tuple[StateTransition | None, StateMatch | None]:
+        candidates: list[StateMatch] = []
+        for next_state_name in state.next_states:
+            detector = runtime.detector_for(next_state_name)
+            if detector is None:
+                continue
+            result = detector.match(frame)
+            candidates.append(StateMatch(next_state_name, detector, result))
+
+        if not candidates:
+            return None, None
+
+        candidates.sort(key=lambda candidate: candidate.result.score if candidate.result is not None else float("inf"))
+        preview_match = candidates[0]
+        matched_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.result is not None and candidate.result.matched
+        ]
+        if not matched_candidates:
+            for candidate in candidates:
+                matched_since[candidate.state_name] = None
+            return None, preview_match
+
+        best_match = matched_candidates[0]
+        runner_up = matched_candidates[1] if len(matched_candidates) > 1 else None
+        best_result = best_match.result
+        if best_result is None:
+            return None, preview_match
+
+        runner_up_score = runner_up.result.score if runner_up is not None and runner_up.result is not None else float("inf")
+        score_margin = runner_up_score - best_result.score
+        winner_name = best_match.state_name
+
+        if runner_up is not None and score_margin < state.decision_margin:
+            matched_since[winner_name] = None
+            for candidate in matched_candidates[1:]:
+                matched_since[candidate.state_name] = None
+            return None, best_match
+
+        started = matched_since[winner_name]
+        if started is None:
+            matched_since[winner_name] = now
+            started = now
+        held_ms = int(max(0.0, now - started) * 1000)
+        next_state = runtime.definition.states[winner_name]
+        required_hold_ms = max(0, next_state.scene.hold_ms if next_state.scene else 0)
+        if held_ms >= required_hold_ms:
+            margin_detail = "only matched candidate"
+            if runner_up is not None:
+                margin_detail = f"margin={score_margin:.4f}"
+            detail = (
+                f'Decided "{winner_name}" with score={best_result.score:.4f} '
+                f'and {margin_detail}.'
+            )
+            self._set_preview_detector(
+                step=f'State "{state.name}"',
+                detector=best_match.detector,
+                result=best_result,
+                detail=detail,
+            )
+            print(detail)
+            return (
+                StateTransition(next_state=winner_name, match=best_match),
+                best_match,
+            )
+
+        for candidate in candidates:
+            if candidate.state_name == winner_name:
+                continue
+            matched_since[candidate.state_name] = None
+
+        return None, best_match
+
     def _complete_terminal_state(
         self,
         runtime: SequenceRuntime,
@@ -399,23 +563,33 @@ class CameraLoopRunner:
     def _wait_for_command(self) -> str:
         sequence_id = self._ensure_selected_sequence()
         self._current_sequence_id = sequence_id
-        if self._controller_connected:
-            self.stats.mark_status(sequence_id, "paired")
-        else:
-            self.stats.mark_status(sequence_id, "stopped")
+        self.stats.mark_status(sequence_id, "stopped")
         while True:
             command = self._consume_control_command()
+            if command == "stop":
+                print("Stop command received.")
+                return command
             if command == "pair":
                 print("Pair command received.")
                 return command
             if command == "restart":
                 print("Restart command received.")
                 return command
+            if command == "reset":
+                print("Reset command received.")
+                return command
             time.sleep(self.config.control_poll_interval)
 
     def _consume_control_command(self) -> str:
         command = self.control.refresh()
-        if command in {"pair", "restart", "stop"}:
+        if command in {"pair", "restart", "reset", "stop"}:
+            self.control.set_command("noop")
+            return command
+        return "noop"
+
+    def _consume_pending_command(self) -> str:
+        command = self.control.refresh()
+        if command in {"restart", "reset", "stop"}:
             self.control.set_command("noop")
             return command
         return "noop"
@@ -428,6 +602,7 @@ class CameraLoopRunner:
         timeout_ms: int,
         step: str,
         zero_timeout_is_infinite: bool,
+        hold_ms_override: int | None = None,
     ) -> StateMatch | None:
         detectable_states = [
             state_name
@@ -440,15 +615,19 @@ class CameraLoopRunner:
         matched_since = {state_name: None for state_name in detectable_states}
         single_pass = timeout_ms <= 0 and not zero_timeout_is_infinite
         deadline = None if timeout_ms <= 0 else time.monotonic() + (timeout_ms / 1000.0)
+        scan_index = 0
         while True:
             self._abort_if_control_requested()
             now = time.monotonic()
             if deadline is not None and now >= deadline:
                 return None
 
+            scan_index += 1
+            pass_started = time.monotonic()
             frame = self.capture.get_frame()
             boxes: list[OverlayBox] = []
             best_match: StateMatch | None = None
+            scan_entries: list[tuple[str, MatchResult, float, int, int]] = []
             for state_name in detectable_states:
                 state = runtime.definition.states[state_name]
                 detector = runtime.detector_for(state_name)
@@ -466,8 +645,11 @@ class CameraLoopRunner:
                         matched_since[state_name] = now
                         started = now
                     held_ms = int(max(0.0, now - started) * 1000)
-                    hold_ms = state.scene.hold_ms if state.scene is not None else 0
-                    if held_ms >= hold_ms:
+                    configured_hold_ms = state.scene.hold_ms if state.scene is not None else 0
+                    effective_hold_ms = hold_ms_override if hold_ms_override is not None else configured_hold_ms
+                    threshold = state.scene.threshold if state.scene is not None else 0.0
+                    scan_entries.append((state_name, result, threshold, held_ms, effective_hold_ms))
+                    if held_ms >= effective_hold_ms:
                         self._set_preview_detector(
                             step=step,
                             detector=detector,
@@ -477,11 +659,26 @@ class CameraLoopRunner:
                         print(f'Matched state "{state_name}" while scanning {step}.')
                         return candidate
                 else:
+                    configured_hold_ms = state.scene.hold_ms if state.scene is not None else 0
+                    effective_hold_ms = hold_ms_override if hold_ms_override is not None else configured_hold_ms
+                    threshold = state.scene.threshold if state.scene is not None else 0.0
+                    scan_entries.append((state_name, result, threshold, 0, effective_hold_ms))
                     matched_since[state_name] = None
 
+            pass_elapsed_ms = int(max(0.0, time.monotonic() - pass_started) * 1000)
+            scan_detail = self._format_scan_entries(scan_entries)
+            if self._should_log_scan_entries(step):
+                remaining_ms = None
+                if deadline is not None:
+                    remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+                print(
+                    f'{step} pass {scan_index} took {pass_elapsed_ms} ms'
+                    + ("" if remaining_ms is None else f", remaining={remaining_ms} ms")
+                    + f": {scan_detail}"
+                )
             self._set_preview_boxes(
                 step=step,
-                detail=f'Scanning states: {", ".join(detectable_states)}',
+                detail=scan_detail,
                 boxes=boxes,
             )
             if single_pass:
@@ -505,27 +702,98 @@ class CameraLoopRunner:
         state: StateSpec | None,
         detail: str,
     ) -> LoopOutcome | StateTransition:
+        self._timeout_reset_count += 1
         print(f"{detail} Attempting recovery...")
-        recovery_match = self._wait_for_state_match(
-            runtime,
-            runtime.definition.recovery.states,
-            timeout_ms=runtime.definition.recovery.timeout_ms,
-            step="Recovery",
-            zero_timeout_is_infinite=False,
-        )
+        recovery_match = self._wait_for_recovery_match(runtime, step="Recovery")
         if recovery_match is not None:
             return StateTransition(next_state=recovery_match.state_name, match=recovery_match)
 
+        return self._fail_recovery(
+            runtime,
+            state=state,
+            detail=f"{detail} Recovery failed.",
+            outcome_name="recovery_failed",
+            saved_state_name="timeout" if state is None else state.name,
+            notify=True,
+        )
+
+    def _fail_recovery(
+        self,
+        runtime: SequenceRuntime,
+        *,
+        state: StateSpec | None,
+        detail: str,
+        outcome_name: str,
+        saved_state_name: str,
+        notify: bool,
+    ) -> LoopOutcome:
         frame = self.capture.get_frame()
-        saved = self._save_outcome_frame(
+        saved = self._save_outcome_frame(frame, runtime.sequence_id, saved_state_name)
+        recovery_roi_paths = self._save_recovery_state_rois(
             frame,
-            runtime.sequence_id,
-            "timeout" if state is None else state.name,
+            runtime,
+            label=saved_state_name,
         )
-        return LoopOutcome(
-            "retry",
-            f"{detail} Recovery failed. Saved frame to {saved}.",
+        outcome_detail = f"{detail} Saved frame to {saved}."
+        if recovery_roi_paths:
+            outcome_detail = (
+                f"{outcome_detail} Saved {len(recovery_roi_paths)} recovery ROI crops to "
+                f"{recovery_roi_paths[0].parent}."
+            )
+        if notify:
+            self._notify(
+                f'Sequence "{runtime.sequence_id}" {outcome_name.replace("_", " ")}',
+                self._notification_body(outcome_detail),
+            )
+        return LoopOutcome(outcome_name, outcome_detail)
+
+    def _wait_for_recovery_match(
+        self,
+        runtime: SequenceRuntime,
+        *,
+        step: str,
+    ) -> StateMatch | None:
+        timeout_ms = runtime.definition.recovery.timeout_ms
+        recovery_states = runtime.definition.recovery.states
+        detectable_states = tuple(
+            state_name
+            for state_name in recovery_states
+            if runtime.definition.states[state_name].scene is not None
         )
+        print(
+            f"{step}: recovery timeout={timeout_ms} ms, "
+            f"states={list(detectable_states)}"
+        )
+        return self._wait_for_state_match(
+            runtime,
+            detectable_states,
+            timeout_ms=timeout_ms,
+            step=step,
+            zero_timeout_is_infinite=False,
+            hold_ms_override=0,
+        )
+
+    def _should_log_scan_entries(self, step: str) -> bool:
+        normalized = step.lower()
+        return "recovery" in normalized
+
+    def _format_scan_entries(
+        self,
+        scan_entries: list[tuple[str, MatchResult, float, int, int]],
+    ) -> str:
+        if not scan_entries:
+            return "No detector scores."
+        sorted_entries = sorted(scan_entries, key=lambda entry: entry[1].score)
+        parts: list[str] = []
+        for state_name, result, threshold, held_ms, hold_ms in sorted_entries:
+            status = "matched" if result.matched else "searching"
+            hold_part = f", hold={held_ms}/{hold_ms}ms" if hold_ms > 0 else ""
+            offset_part = f", offset=({result.offset_x},{result.offset_y})"
+            parts.append(
+                f"{state_name}={result.score:.4f}/th={threshold:.4f} "
+                f"({status}{hold_part}{offset_part})"
+            )
+        return "; ".join(parts)
 
     def _perform_action(self, action: ActionSpec) -> None:
         self._note_button_press(action.buttons)
@@ -534,6 +802,14 @@ class CameraLoopRunner:
             down=action.down_seconds,
             up=action.up_seconds,
         )
+
+    def _force_game_reset(self) -> None:
+        buttons = (Button.A, Button.B, Button.X, Button.Y)
+        detail = "Sending forced game reset buttons (A+B+X+Y)."
+        self._set_preview_state("resetting", detail, [])
+        print(detail)
+        self._note_button_press(buttons, duration_seconds=2.0)
+        self.controller.press(*buttons, down=0.15, up=1.5)
 
     def _on_state_reached(
         self,
@@ -552,8 +828,8 @@ class CameraLoopRunner:
 
     def _pair_controller(self) -> None:
         if self._controller_connected:
-            self._mark_current_status("paired")
-            self._set_preview_state("paired", "Controller already connected. Waiting for restart.", [])
+            self._mark_current_status("stopped")
+            self._set_preview_state("stopped", "Controller already connected. Waiting for restart.", [])
             print("Controller is already connected. Waiting for restart.")
             return
 
@@ -568,12 +844,22 @@ class CameraLoopRunner:
             self._mark_current_status("stopped", last_outcome="pair_cancelled")
             print("Pairing cancelled. Automation is now idle.")
             return
+        except RestartRequested:
+            self._mark_current_status("stopped", last_outcome="pair_cancelled")
+            self.control.set_command("restart")
+            print("Pairing interrupted by restart request. Starting a fresh loop next.")
+            return
+        except ResetRequested:
+            self._mark_current_status("stopped", last_outcome="pair_cancelled")
+            self.control.set_command("reset")
+            print("Pairing interrupted by reset request. Forcing a game reset next.")
+            return
         finally:
             if restore_reconnect is not None:
                 self.controller.set_reconnect(restore_reconnect)
 
-        self._mark_current_status("paired")
-        self._set_preview_state("paired", "Controller connected. Waiting for restart.", [])
+        self._mark_current_status("stopped")
+        self._set_preview_state("stopped", "Controller connected. Waiting for restart.", [])
         print("Controller connected in pairing mode. Future restarts will reuse the connection.")
 
     def preview_overlay_lines(self) -> list[str]:
@@ -603,13 +889,13 @@ class CameraLoopRunner:
         )
 
     def _abort_if_control_requested(self) -> None:
-        command = self.control.refresh()
+        command = self._consume_pending_command()
         if command == "stop":
-            self.control.set_command("noop")
             raise StopRequested
         if command == "restart":
-            self.control.set_command("noop")
             raise RestartRequested
+        if command == "reset":
+            raise ResetRequested
 
     def _checkpoint_stats(self, force: bool = False) -> None:
         if self._current_sequence_id is None:
@@ -802,6 +1088,45 @@ class CameraLoopRunner:
         path.write_bytes(encode_rgb_frame(cropped, quality=95))
         self._latest_state_roi_path = path
         return path
+
+    def _save_recovery_state_rois(
+        self,
+        frame,
+        runtime: SequenceRuntime,
+        *,
+        label: str,
+    ) -> list[Path]:
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        directory = self.config.state_roi_dir / runtime.sequence_id / "recovery"
+        directory.mkdir(parents=True, exist_ok=True)
+
+        saved: list[tuple[float, Path]] = []
+        for state_name in runtime.definition.recovery.states:
+            state = runtime.definition.states.get(state_name)
+            detector = runtime.detector_for(state_name)
+            if state is None or state.scene is None or detector is None:
+                continue
+
+            result = detector.match(frame)
+            roi = Roi(
+                x=state.scene.roi.x + result.offset_x,
+                y=state.scene.roi.y + result.offset_y,
+                width=state.scene.roi.width,
+                height=state.scene.roi.height,
+            )
+            cropped = roi.crop(frame)
+            filename = (
+                f"{label}-{timestamp}-{state_name}-"
+                f"score-{result.score:.4f}.jpg"
+            )
+            path = directory / filename
+            path.write_bytes(encode_rgb_frame(cropped, quality=95))
+            saved.append((result.score, path))
+
+        if saved:
+            saved.sort(key=lambda item: item[0])
+            self._latest_state_roi_path = saved[0][1]
+        return [path for _, path in saved]
 
     def _load_selected_runtime(self) -> SequenceRuntime:
         self.control.refresh()
