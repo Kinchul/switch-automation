@@ -85,37 +85,58 @@ class StaticImageDetector:
         self.stride = stride
         self.search_step = search_step
         self.roi, self._reference = _prepare_reference_crop(self.image_path, roi, self.stride)
+        # Number of downsampled positions to advance per search step
+        self._step = max(1, search_step // stride)
 
     def match(self, frame: np.ndarray) -> MatchResult:
-        frame_height, frame_width = frame.shape[:2]
-        best_score = float("inf")
-        best_offset = (0, 0)
+        frame_h, frame_w = frame.shape[:2]
 
-        for offset_y in range(-self.search_margin, self.search_margin + 1, self.search_step):
-            y = self.roi.y + offset_y
-            if y < 0 or y + self.roi.height > frame_height:
-                continue
-            for offset_x in range(-self.search_margin, self.search_margin + 1, self.search_step):
-                x = self.roi.x + offset_x
-                if x < 0 or x + self.roi.width > frame_width:
-                    continue
+        y1 = max(0, self.roi.y - self.search_margin)
+        y2 = min(frame_h, self.roi.y + self.roi.height + self.search_margin)
+        x1 = max(0, self.roi.x - self.search_margin)
+        x2 = min(frame_w, self.roi.x + self.roi.width + self.search_margin)
 
-                candidate = frame[y : y + self.roi.height, x : x + self.roi.width]
-                candidate = _downsample(candidate, self.stride).astype(np.int16, copy=False)
-                if candidate.shape != self._reference.shape:
-                    raise RuntimeError(
-                        f'Detector "{self.name}" reference shape {self._reference.shape} '
-                        f"does not match candidate shape {candidate.shape}. "
-                        f"Reference image: {self.image_path}"
-                    )
-                score = float(np.abs(candidate - self._reference).mean() / 255.0)
-                if score < best_score:
-                    best_score = score
-                    best_offset = (offset_x, offset_y)
+        # Crop once, downsample in place — O(1) numpy views until astype
+        search = frame[y1:y2, x1:x2][::self.stride, ::self.stride].astype(np.int16)
+        ref = self._reference  # (H_r, W_r, C) int16, pre-downsampled
+        H_r, W_r, C = ref.shape
+        H_s, W_s = search.shape[:2]
+
+        if H_s < H_r or W_s < W_r:
+            return MatchResult(matched=False, score=1.0)
+
+        step = self._step
+        n_y = H_s - H_r + 1
+        n_x = W_s - W_r + 1
+        # ceil division: number of sampled positions along each axis
+        n_y_s = (n_y + step - 1) // step
+        n_x_s = (n_x + step - 1) // step
+
+        # Strided view: windows[i, j] == search[i*step : i*step+H_r, j*step : j*step+W_r, :]
+        # Baking step into the outer strides avoids materialising unused positions.
+        sy, sx, sc = search.strides
+        windows = np.lib.stride_tricks.as_strided(
+            search,
+            shape=(n_y_s, n_x_s, H_r, W_r, C),
+            strides=(sy * step, sx * step, sy, sx, sc),
+            writeable=False,
+        )
+
+        # Vectorised MAE/255 for all sampled positions at once
+        scores = np.abs(windows - ref).mean(axis=(2, 3, 4)) / 255.0  # (n_y_s, n_x_s)
+
+        best_flat = int(scores.argmin())
+        best_y, best_x = divmod(best_flat, n_x_s)
+        best_score = float(scores[best_y, best_x])
+
+        # Map back to pixel offsets relative to the nominal ROI position
+        effective_stride = self.stride * step
+        offset_y = (y1 + best_y * effective_stride) - self.roi.y
+        offset_x = (x1 + best_x * effective_stride) - self.roi.x
 
         return MatchResult(
             matched=best_score <= self.threshold,
             score=best_score,
-            offset_x=best_offset[0],
-            offset_y=best_offset[1],
+            offset_x=offset_x,
+            offset_y=offset_y,
         )

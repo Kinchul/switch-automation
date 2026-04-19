@@ -104,14 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--debug-dir",
         type=Path,
-        default=ROOT / "debug" / "camera" / "outcomes",
-        help="Directory where terminal-state full frames are saved.",
-    )
-    parser.add_argument(
-        "--state-roi-dir",
-        type=Path,
-        default=ROOT / "debug" / "camera" / "state_rois",
-        help="Directory where terminal-state ROI crops are saved when a state defines an ROI.",
+        default=ROOT / "debug" / "camera",
+        help="Root directory under which per-sequence image subdirectories are created.",
     )
     parser.add_argument(
         "--service-lock",
@@ -188,7 +182,6 @@ def build_config(args: argparse.Namespace) -> CameraLoopConfig:
         sequences_dir=args.sequences_dir,
         default_sequence=args.default_sequence,
         debug_dir=args.debug_dir,
-        state_roi_dir=args.state_roi_dir,
         stats_file=args.stats_file,
         control_file=args.control_file,
         match_poll_interval=args.match_poll_interval,

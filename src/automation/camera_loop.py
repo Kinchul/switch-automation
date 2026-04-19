@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,12 +35,11 @@ class LoopOutcome:
 class CameraLoopConfig:
     sequences_dir: Path = Path("sequences")
     default_sequence: str | None = None
-    debug_dir: Path = Path("debug/camera/outcomes")
-    state_roi_dir: Path = Path("debug/camera/state_rois")
+    debug_dir: Path = Path("debug/camera")
     stats_file: Path = Path("debug/camera/loop_stats.json")
     control_file: Path = Path("debug/camera/loop_control.json")
     control_poll_interval: float = 0.5
-    match_poll_interval: float = 0.05
+    match_poll_interval: float = 0.1
     stats_checkpoint_interval: float = 5.0
 
 
@@ -54,6 +54,15 @@ class StateMatch:
 class StateTransition:
     next_state: str
     match: StateMatch
+
+
+def _trimmed_mean(buf: deque, outlier_ratio: float = 0.25) -> float:
+    if not buf:
+        return 1.0
+    sorted_vals = sorted(buf)
+    trim = int(len(sorted_vals) * outlier_ratio)
+    kept = sorted_vals[:len(sorted_vals) - trim] if trim > 0 else sorted_vals
+    return sum(kept) / len(kept)
 
 
 class StopRequested(Exception):
@@ -96,6 +105,7 @@ class CameraLoopRunner:
         self._latest_state_roi_path: Path | None = None
         self._timeout_reset_count = 0
         self._entered_initial_state_once = False
+        self._frame_buffer: deque = deque(maxlen=5)
 
     def initialize(self) -> LoopStatsSnapshot:
         self.control.set_command("noop")
@@ -313,7 +323,13 @@ class CameraLoopRunner:
             self._checkpoint_stats()
 
         if state.reset_loop:
-            print(f'State "{state.name}" requested a forced reset loop.')
+            frame = self.capture.get_frame()
+            saved = self._save_target_failed_roi(frame, runtime.sequence_id, state, entry_match.result)
+            snapshot = self.stats.record_retry(runtime.sequence_id)
+            print(
+                f'State "{state.name}" reset loop — loop {snapshot.loop_counter}.'
+                + (f" Saved ROI to {saved}." if saved else "")
+            )
             raise ResetRequested
 
         immediate_transition = self._immediate_transition(runtime, state)
@@ -333,6 +349,13 @@ class CameraLoopRunner:
             for next_state in state.next_states
             if runtime.detector_for(next_state) is not None
         }
+        score_buffers: dict[str, deque] = {
+            ns: deque(maxlen=runtime.definition.states[ns].scene.score_window)
+            for ns in state.next_states
+            if runtime.detector_for(ns) is not None
+            and runtime.definition.states[ns].scene is not None
+            and runtime.definition.states[ns].scene.score_window > 1
+        }
 
         while True:
             self._abort_if_control_requested()
@@ -348,6 +371,7 @@ class CameraLoopRunner:
                 return self._handle_timeout(runtime, state, f'Timeout in state "{state.name}".')
 
             frame = self.capture.get_frame()
+            self._frame_buffer.append(frame)
             if state.decision_mode == "best_score":
                 transition, best_match = self._find_best_score_transition(
                     runtime,
@@ -363,6 +387,7 @@ class CameraLoopRunner:
                     frame,
                     now,
                     matched_since,
+                    score_buffers,
                 )
             if transition is not None:
                 return transition
@@ -403,6 +428,8 @@ class CameraLoopRunner:
     ) -> StateTransition | None:
         if not state.next_states:
             return None
+        if state.action is not None and state.action.frequency_hz > 0:
+            return None
         first_next = state.next_states[0]
         if runtime.definition.states[first_next].scene is not None:
             return None
@@ -420,6 +447,7 @@ class CameraLoopRunner:
         frame,
         now: float,
         matched_since: dict[str, float | None],
+        score_buffers: dict[str, deque] | None = None,
     ) -> tuple[StateTransition | None, StateMatch | None]:
         best_match: StateMatch | None = None
         preferred_preview_match: StateMatch | None = None
@@ -436,7 +464,15 @@ class CameraLoopRunner:
             if best_match is None or result.score < best_match.result.score:
                 best_match = candidate
 
-            if result.matched:
+            buf = score_buffers.get(next_state_name) if score_buffers else None
+            if buf is not None:
+                buf.append(result.score)
+                threshold = next_state.scene.threshold if next_state.scene else 0.0
+                is_matched = len(buf) == buf.maxlen and _trimmed_mean(buf) < threshold
+            else:
+                is_matched = result.matched
+
+            if is_matched:
                 started = matched_since[next_state_name]
                 if started is None:
                     matched_since[next_state_name] = now
@@ -547,11 +583,8 @@ class CameraLoopRunner:
     ) -> LoopOutcome:
         frame = self.capture.get_frame()
         detail = f'Reached terminal state "{state.name}" in sequence "{runtime.sequence_id}".'
-        saved = self._save_outcome_frame(frame, runtime.sequence_id, state.name)
-        detail = f"{detail} Saved frame to {saved}."
-        roi_path = self._save_state_roi(frame, runtime.sequence_id, state, match.result)
-        if roi_path is not None:
-            detail = f"{detail} Saved ROI to {roi_path}."
+        directory = self._save_target_ok(frame, runtime.sequence_id, state, match.result)
+        detail = f"{detail} Saved to {directory}."
 
         if state.notification == "mail":
             self._notify(
@@ -613,6 +646,12 @@ class CameraLoopRunner:
             return None
 
         matched_since = {state_name: None for state_name in detectable_states}
+        score_buffers: dict[str, deque] = {
+            state_name: deque(maxlen=runtime.definition.states[state_name].scene.score_window)
+            for state_name in detectable_states
+            if runtime.definition.states[state_name].scene is not None
+            and runtime.definition.states[state_name].scene.score_window > 1
+        }
         single_pass = timeout_ms <= 0 and not zero_timeout_is_infinite
         deadline = None if timeout_ms <= 0 else time.monotonic() + (timeout_ms / 1000.0)
         scan_index = 0
@@ -639,7 +678,15 @@ class CameraLoopRunner:
                 if best_match is None or result.score < best_match.result.score:
                     best_match = candidate
 
-                if result.matched:
+                buf = score_buffers.get(state_name)
+                if buf is not None:
+                    buf.append(result.score)
+                    threshold = state.scene.threshold if state.scene is not None else 0.0
+                    is_matched = len(buf) == buf.maxlen and _trimmed_mean(buf) < threshold
+                else:
+                    is_matched = result.matched
+
+                if is_matched:
                     started = matched_since[state_name]
                     if started is None:
                         matched_since[state_name] = now
@@ -659,6 +706,7 @@ class CameraLoopRunner:
                         print(f'Matched state "{state_name}" while scanning {step}.')
                         return candidate
                 else:
+                    matched_since[state_name] = None
                     configured_hold_ms = state.scene.hold_ms if state.scene is not None else 0
                     effective_hold_ms = hold_ms_override if hold_ms_override is not None else configured_hold_ms
                     threshold = state.scene.threshold if state.scene is not None else 0.0
@@ -728,18 +776,8 @@ class CameraLoopRunner:
         notify: bool,
     ) -> LoopOutcome:
         frame = self.capture.get_frame()
-        saved = self._save_outcome_frame(frame, runtime.sequence_id, saved_state_name)
-        recovery_roi_paths = self._save_recovery_state_rois(
-            frame,
-            runtime,
-            label=saved_state_name,
-        )
+        saved = self._save_failed_recovery(frame, runtime.sequence_id)
         outcome_detail = f"{detail} Saved frame to {saved}."
-        if recovery_roi_paths:
-            outcome_detail = (
-                f"{outcome_detail} Saved {len(recovery_roi_paths)} recovery ROI crops to "
-                f"{recovery_roi_paths[0].parent}."
-            )
         if notify:
             self._notify(
                 f'Sequence "{runtime.sequence_id}" {outcome_name.replace("_", " ")}',
@@ -1058,15 +1096,7 @@ class CameraLoopRunner:
         except Exception as exc:
             print(f"Notification failed: {exc}")
 
-    def _save_outcome_frame(self, frame, sequence_id: str, state_name: str) -> Path:
-        directory = self.config.debug_dir / sequence_id
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{state_name}-{time.strftime('%Y%m%d-%H%M%S')}.jpg"
-        path.write_bytes(encode_rgb_frame(frame, quality=95))
-        self._latest_outcome_frame_path = path
-        return path
-
-    def _save_state_roi(
+    def _save_target_failed_roi(
         self,
         frame,
         sequence_id: str,
@@ -1082,51 +1112,48 @@ class CameraLoopRunner:
             height=state.scene.roi.height,
         )
         cropped = roi.crop(frame)
-        directory = self.config.state_roi_dir / sequence_id
+        directory = self.config.debug_dir / sequence_id / "target_failed"
         directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{state.name}-{time.strftime('%Y%m%d-%H%M%S')}.jpg"
+        path = directory / f"{time.strftime('%Y%m%d-%H%M%S')}-score-{result.score:.4f}.jpg"
         path.write_bytes(encode_rgb_frame(cropped, quality=95))
         self._latest_state_roi_path = path
         return path
 
-    def _save_recovery_state_rois(
+    def _save_failed_recovery(self, frame, sequence_id: str) -> Path:
+        directory = self.config.debug_dir / sequence_id / "failed_recovery"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{time.strftime('%Y%m%d-%H%M%S')}.jpg"
+        path.write_bytes(encode_rgb_frame(frame, quality=95))
+        self._latest_outcome_frame_path = path
+        return path
+
+    def _save_target_ok(
         self,
         frame,
-        runtime: SequenceRuntime,
-        *,
-        label: str,
-    ) -> list[Path]:
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        directory = self.config.state_roi_dir / runtime.sequence_id / "recovery"
+        sequence_id: str,
+        state: StateSpec,
+        result: MatchResult | None,
+    ) -> Path:
+        directory = self.config.debug_dir / sequence_id / "target_ok"
         directory.mkdir(parents=True, exist_ok=True)
-
-        saved: list[tuple[float, Path]] = []
-        for state_name in runtime.definition.recovery.states:
-            state = runtime.definition.states.get(state_name)
-            detector = runtime.detector_for(state_name)
-            if state is None or state.scene is None or detector is None:
-                continue
-
-            result = detector.match(frame)
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        for i, buf_frame in enumerate(self._frame_buffer):
+            buf_path = directory / f"{ts}-before-{i:02d}.jpg"
+            buf_path.write_bytes(encode_rgb_frame(buf_frame, quality=95))
+        full_path = directory / f"{ts}-full.jpg"
+        full_path.write_bytes(encode_rgb_frame(frame, quality=95))
+        self._latest_outcome_frame_path = full_path
+        if state.scene is not None and result is not None:
             roi = Roi(
                 x=state.scene.roi.x + result.offset_x,
                 y=state.scene.roi.y + result.offset_y,
                 width=state.scene.roi.width,
                 height=state.scene.roi.height,
             )
-            cropped = roi.crop(frame)
-            filename = (
-                f"{label}-{timestamp}-{state_name}-"
-                f"score-{result.score:.4f}.jpg"
-            )
-            path = directory / filename
-            path.write_bytes(encode_rgb_frame(cropped, quality=95))
-            saved.append((result.score, path))
-
-        if saved:
-            saved.sort(key=lambda item: item[0])
-            self._latest_state_roi_path = saved[0][1]
-        return [path for _, path in saved]
+            roi_path = directory / f"{ts}-roi.jpg"
+            roi_path.write_bytes(encode_rgb_frame(roi.crop(frame), quality=95))
+            self._latest_state_roi_path = roi_path
+        return directory
 
     def _load_selected_runtime(self) -> SequenceRuntime:
         self.control.refresh()

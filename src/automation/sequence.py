@@ -56,6 +56,7 @@ class SceneDefaults:
     stride: int = 4
     search_step: int = 2
     hold_ms: int = 0
+    score_window: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +68,7 @@ class SceneSpec:
     stride: int
     search_step: int
     hold_ms: int
+    score_window: int
 
     def build_detector(self, name: str):
         from vision.detector import Roi as DetectorRoi, StaticImageDetector
@@ -309,6 +311,7 @@ def _parse_defaults(raw_defaults: Any) -> SequenceDefaults:
             stride=_as_int(scene_raw.get("stride", 4), "defaults.scene.stride"),
             search_step=_as_int(scene_raw.get("search_step", 2), "defaults.scene.search_step"),
             hold_ms=_as_int(scene_raw.get("hold_ms", 0), "defaults.scene.hold_ms"),
+            score_window=_as_int(scene_raw.get("score_window", 1), "defaults.scene.score_window"),
         ),
         action=ActionDefaults(
             frequency_hz=float(action_raw.get("frequency_hz", 0)),
@@ -387,6 +390,7 @@ def _parse_scene(
             f"{state_name}.scene.search_step",
         ),
         hold_ms=_as_int(raw_scene.get("hold_ms", defaults.hold_ms), f"{state_name}.scene.hold_ms"),
+        score_window=_as_int(raw_scene.get("score_window", defaults.score_window), f"{state_name}.scene.score_window"),
     )
 
 
