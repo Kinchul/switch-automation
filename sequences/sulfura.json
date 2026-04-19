@@ -39,7 +39,7 @@
         "search_step": 4
       },
       "next_states": ["press_start"],
-      "timeout_ms": 4000,
+      "timeout_ms": 5000,
       "action": {
         "buttons": ["A"]
       }
@@ -92,13 +92,13 @@
           "width": 324,
           "height": 69
         },
-        "threshold": 0.09,
+        "threshold": 0.08,
         "stride": 2,
         "search_margin": 16,
         "search_step": 4
       },
       "next_states": ["ready"],
-      "timeout_ms": 6000,
+      "timeout_ms": 3000,
       "action": {
         "buttons": ["B"]
       }
@@ -112,7 +112,7 @@
           "width": 200,
           "height": 233
         },
-        "threshold": 0.16,
+        "threshold": 0.18,
         "search_margin": 24,
         "stride": 8,
         "search_step": 4
@@ -142,7 +142,7 @@
     },
     "target_detect": {
       "next_states": ["target_failed"],
-      "timeout_ms": 6000,
+      "timeout_ms": 3000,
       "timeout_next_state": "target_ok"
     },
     "target_failed": {
@@ -154,8 +154,9 @@
           "width": 356,
           "height": 360
         },
-        "threshold": 0.085,
-        "hold_ms": 800
+        "threshold": 0.045,
+        "search_margin": 5,
+        "hold_ms": 1000
       },
       "next_states": ["game_launch"],
       "timeout_ms": 5000,

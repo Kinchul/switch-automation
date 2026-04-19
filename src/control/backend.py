@@ -40,6 +40,9 @@ class ControllerBackend(ABC):
     def macro(self, commands: str, block: bool = True):
         raise NotImplementedError
 
+    def release_all(self) -> None:
+        pass
+
     @abstractmethod
     def close(self) -> None:
         raise NotImplementedError
