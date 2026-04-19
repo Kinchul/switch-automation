@@ -1,7 +1,7 @@
 {
   "recovery": {
     "states": [
-      "target_failed",
+      "fight_started",
       "ready",
       "continue",
       "previously",
@@ -67,10 +67,10 @@
       "scene": {
         "image_path": "../images/2_select_save.png",
         "roi": {
-          "x": 479,
-          "y": 198,
-          "width": 302,
-          "height": 72
+          "x": 474,
+          "y": 224,
+          "width": 271,
+          "height": 88
         },
         "threshold": 0.08,
         "stride": 2,
@@ -87,14 +87,14 @@
       "scene": {
         "image_path": "../images/3_previously.png",
         "roi": {
-          "x": 384,
-          "y": 151,
-          "width": 650,
-          "height": 85
+          "x": 379,
+          "y": 196,
+          "width": 324,
+          "height": 69
         },
         "threshold": 0.09,
         "stride": 2,
-        "search_margin": 24,
+        "search_margin": 16,
         "search_step": 4
       },
       "next_states": ["ready"],
@@ -117,12 +117,28 @@
         "stride": 8,
         "search_step": 4
       },
-      "next_states": ["target_failed"],
-      "timeout_ms": 4000,
-      "timeout_next_state": "target_detect",
+      "next_states": ["fight_started"],
+      "timeout_ms": 10000,
       "action": {
         "buttons": ["A"]
       }
+    },
+    "fight_started": {
+      "scene": {
+        "image_path": "../images/5_target_failed.png",
+        "roi": {
+          "x": 422,
+          "y": 259,
+          "width": 442,
+          "height": 75
+        },
+        "threshold": 0.09,
+        "stride": 2,
+        "search_margin": 16,
+        "search_step": 4
+      },
+      "next_states": ["target_detect"],
+      "timeout_ms": 3000
     },
     "target_detect": {
       "next_states": ["target_failed"],
@@ -131,12 +147,12 @@
     },
     "target_failed": {
       "scene": {
-        "image_path": "../images/6_target_failed.png",
+        "image_path": "../images/5_target_failed.png",
         "roi": {
-          "x": 1040,
-          "y": 186,
-          "width": 381,
-          "height": 337
+          "x": 1026,
+          "y": 214,
+          "width": 356,
+          "height": 360
         },
         "threshold": 0.085,
         "hold_ms": 800
