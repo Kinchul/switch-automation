@@ -7,6 +7,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .codex
+.claude
 debug/
 tools/bdaddr/bdaddr
 review/
