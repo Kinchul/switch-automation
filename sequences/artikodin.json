@@ -27,14 +27,14 @@
   "states": {
     "game_launch": {
       "scene": {
-        "image_path": "../images/sulfura/0_game_launch.png",
+        "image_path": "../images/artikodin/0_game_launch.png",
         "roi": {
-          "x": 610,
-          "y": 373,
-          "width": 669,
-          "height": 334
+          "x": 581,
+          "y": 386,
+          "width": 668,
+          "height": 330
         },
-        "threshold": 0.12,
+        "threshold": 0.08,
         "stride": 6,
         "search_step": 4
       },
@@ -46,14 +46,14 @@
     },
     "press_start": {
       "scene": {
-        "image_path": "../images/sulfura/1_press_start.png",
+        "image_path": "../images/artikodin/1_press_start.png",
         "roi": {
-          "x": 419,
-          "y": 169,
-          "width": 763,
-          "height": 295
+          "x": 408,
+          "y": 770,
+          "width": 649,
+          "height": 89
         },
-        "threshold": 0.12,
+        "threshold": 0.08,
         "stride": 6,
         "search_step": 4
       },
@@ -65,12 +65,12 @@
     },
     "continue": {
       "scene": {
-        "image_path": "../images/sulfura/2_select_save.png",
+        "image_path": "../images/artikodin/2_select_save.png",
         "roi": {
-          "x": 474,
-          "y": 224,
-          "width": 271,
-          "height": 88
+          "x": 478,
+          "y": 228,
+          "width": 262,
+          "height": 71
         },
         "threshold": 0.08,
         "stride": 2,
@@ -85,12 +85,12 @@
     },
     "previously": {
       "scene": {
-        "image_path": "../images/sulfura/3_previously.png",
+        "image_path": "../images/artikodin/3_previously.png",
         "roi": {
-          "x": 379,
-          "y": 196,
-          "width": 324,
-          "height": 69
+          "x": 391,
+          "y": 204,
+          "width": 303,
+          "height": 56
         },
         "threshold": 0.08,
         "stride": 2,
@@ -105,16 +105,16 @@
     },
     "ready": {
       "scene": {
-        "image_path": "../images/sulfura/4_ready.png",
+        "image_path": "../images/artikodin/4_ready.png",
         "roi": {
-          "x": 838,
-          "y": 384,
-          "width": 200,
-          "height": 233
+          "x": 757,
+          "y": 482,
+          "width": 207,
+          "height": 146
         },
-        "threshold": 0.18,
+        "threshold": 0.08,
         "search_margin": 24,
-        "stride": 8,
+        "stride": 4,
         "search_step": 4
       },
       "next_states": ["fight_started"],
@@ -125,14 +125,14 @@
     },
     "fight_started": {
       "scene": {
-        "image_path": "../images/sulfura/5_target_failed.png",
+        "image_path": "../images/artikodin/5_target_failed.png",
         "roi": {
-          "x": 422,
-          "y": 259,
-          "width": 442,
-          "height": 75
+          "x": 458,
+          "y": 275,
+          "width": 197,
+          "height": 56
         },
-        "threshold": 0.09,
+        "threshold": 0.08,
         "stride": 2,
         "search_margin": 16,
         "search_step": 4
@@ -147,15 +147,17 @@
     },
     "target_failed": {
       "scene": {
-        "image_path": "../images/sulfura/5_target_failed.png",
+        "image_path": "../images/artikodin/5_target_failed.png",
         "roi": {
-          "x": 1026,
-          "y": 214,
-          "width": 356,
-          "height": 360
+          "x": 1020,
+          "y": 196,
+          "width": 343,
+          "height": 358
         },
-        "threshold": 0.045,
-        "search_margin": 5,
+        "threshold": 0.035,
+        "search_margin": 2,
+        "stride": 2,
+        "search_step": 2,
         "hold_ms": 1000
       },
       "next_states": ["game_launch"],
