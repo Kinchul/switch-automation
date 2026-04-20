@@ -54,6 +54,8 @@ class StateMatch:
 class StateTransition:
     next_state: str
     match: StateMatch
+    detail: str | None = None
+    held_ms: int = 0
 
 
 def _trimmed_mean(buf: deque, outlier_ratio: float = 0.25) -> float:
@@ -74,7 +76,9 @@ class RestartRequested(Exception):
 
 
 class ResetRequested(Exception):
-    pass
+    def __init__(self, *, timers_printed: bool = False) -> None:
+        super().__init__()
+        self.timers_printed = timers_printed
 
 
 class CameraLoopRunner:
@@ -194,7 +198,6 @@ class CameraLoopRunner:
             self._entered_initial_state_once = False
             stats = self.stats.start_new_loop(runtime.sequence_id)
             self._last_checkpoint_monotonic = time.monotonic()
-            self._print_timers(runtime.sequence_id, stats)
             skip_startup_recovery = False
             if command == "reset":
                 self._force_game_reset()
@@ -221,13 +224,14 @@ class CameraLoopRunner:
                 print("Restart requested. Starting a fresh loop.")
                 pending_command = "restart"
                 continue
-            except ResetRequested:
+            except ResetRequested as exc:
                 snapshot = self.stats.finish_loop(
                     runtime.sequence_id,
                     "reset_requested",
                     status="stopped",
                 )
-                self._print_timers(runtime.sequence_id, snapshot)
+                if not exc.timers_printed:
+                    self._print_timers(runtime.sequence_id, snapshot)
                 print("Reset requested. Forcing a game reset and starting a fresh loop.")
                 pending_command = "reset"
                 continue
@@ -325,12 +329,14 @@ class CameraLoopRunner:
         if state.reset_loop:
             frame = self.capture.get_frame()
             saved = self._save_target_failed_roi(frame, runtime.sequence_id, state, entry_match.result)
+            pre_snapshot = self.stats.snapshot(runtime.sequence_id)
             snapshot = self.stats.record_retry(runtime.sequence_id)
             print(
                 f'State "{state.name}" reset loop — loop {snapshot.loop_counter}.'
                 + (f" Saved ROI to {saved}." if saved else "")
             )
-            raise ResetRequested
+            self._print_timers(runtime.sequence_id, pre_snapshot)
+            raise ResetRequested(timers_printed=True)
 
         immediate_transition = self._immediate_transition(runtime, state)
         if immediate_transition is not None:
@@ -356,19 +362,24 @@ class CameraLoopRunner:
             and runtime.definition.states[ns].scene is not None
             and runtime.definition.states[ns].scene.score_window > 1
         }
+        last_best_match: StateMatch | None = None
+        state_entry_time = time.monotonic()
 
         while True:
             self._abort_if_control_requested()
             now = time.monotonic()
             if deadline is not None and now >= deadline:
+                score_detail = ""
+                if last_best_match is not None and last_best_match.result is not None:
+                    score_detail = f" Best score: {last_best_match.state_name}={last_best_match.result.score:.4f}."
                 if state.timeout_next_state is not None:
                     tns = state.timeout_next_state
-                    print(f'Timeout in state "{state.name}": no {state.next_states} detected, transitioning to "{tns}".')
+                    print(f'Timeout in state "{state.name}": no {state.next_states} detected, transitioning to "{tns}".{score_detail}')
                     return StateTransition(
                         next_state=tns,
                         match=self._synthetic_state_match(runtime, tns),
                     )
-                return self._handle_timeout(runtime, state, f'Timeout in state "{state.name}".')
+                return self._handle_timeout(runtime, state, f'Timeout in state "{state.name}".{score_detail}')
 
             frame = self.capture.get_frame()
             self._frame_buffer.append(frame)
@@ -390,9 +401,18 @@ class CameraLoopRunner:
                     score_buffers,
                 )
             if transition is not None:
+                detect_ms = int((time.monotonic() - state_entry_time) * 1000)
+                matched_state = runtime.definition.states[transition.next_state]
+                th = matched_state.scene.threshold if matched_state.scene else 0.0
+                score = transition.match.result.score if transition.match.result else float("nan")
+                timeout_part = f", timeout={state.timeout_ms}ms" if state.timeout_ms > 0 else ""
+                extra = f", {transition.detail}" if transition.detail else ""
+                held_part = f", held={transition.held_ms}ms" if transition.held_ms > 0 else ""
+                print(f'Detected "{transition.next_state}": score={score:.4f}/th={th:.4f}{held_part}{extra}, in={detect_ms}ms{timeout_part}.')
                 return transition
 
             if best_match is not None:
+                last_best_match = best_match
                 detail = f'Waiting for one of: {", ".join(state.next_states)}'
                 if state.decision_mode == "best_score":
                     detail = (
@@ -464,10 +484,10 @@ class CameraLoopRunner:
             if best_match is None or result.score < best_match.result.score:
                 best_match = candidate
 
+            threshold = next_state.scene.threshold if next_state.scene else 0.0
             buf = score_buffers.get(next_state_name) if score_buffers else None
             if buf is not None:
                 buf.append(result.score)
-                threshold = next_state.scene.threshold if next_state.scene else 0.0
                 is_matched = len(buf) == buf.maxlen and _trimmed_mean(buf) < threshold
             else:
                 is_matched = result.matched
@@ -480,15 +500,13 @@ class CameraLoopRunner:
                 held_ms = int(max(0.0, now - started) * 1000)
                 required_hold_ms = max(0, next_state.scene.hold_ms if next_state.scene else 0)
                 if held_ms >= required_hold_ms:
-                    detail = f'Matched "{next_state_name}" after {held_ms} ms.'
                     self._set_preview_detector(
                         step=f'State "{state.name}"',
                         detector=detector,
                         result=result,
-                        detail=detail,
+                        detail=f'Matched "{next_state_name}": score={result.score:.4f}/th={threshold:.4f}.',
                     )
-                    print(detail)
-                    return StateTransition(next_state=next_state_name, match=candidate), candidate
+                    return StateTransition(next_state=next_state_name, match=candidate, held_ms=held_ms), candidate
             else:
                 matched_since[next_state_name] = None
 
@@ -549,22 +567,16 @@ class CameraLoopRunner:
         next_state = runtime.definition.states[winner_name]
         required_hold_ms = max(0, next_state.scene.hold_ms if next_state.scene else 0)
         if held_ms >= required_hold_ms:
-            margin_detail = "only matched candidate"
-            if runner_up is not None:
-                margin_detail = f"margin={score_margin:.4f}"
-            detail = (
-                f'Decided "{winner_name}" with score={best_result.score:.4f} '
-                f'and {margin_detail}.'
-            )
+            winner_threshold = next_state.scene.threshold if next_state.scene else 0.0
+            margin_detail = f"margin={score_margin:.4f}" if runner_up is not None else None
             self._set_preview_detector(
                 step=f'State "{state.name}"',
                 detector=best_match.detector,
                 result=best_result,
-                detail=detail,
+                detail=f'Decided "{winner_name}": score={best_result.score:.4f}/th={winner_threshold:.4f}.',
             )
-            print(detail)
             return (
-                StateTransition(next_state=winner_name, match=best_match),
+                StateTransition(next_state=winner_name, match=best_match, detail=margin_detail, held_ms=held_ms),
                 best_match,
             )
 
@@ -653,6 +665,7 @@ class CameraLoopRunner:
             and runtime.definition.states[state_name].scene.score_window > 1
         }
         single_pass = timeout_ms <= 0 and not zero_timeout_is_infinite
+        scan_start = time.monotonic()
         deadline = None if timeout_ms <= 0 else time.monotonic() + (timeout_ms / 1000.0)
         scan_index = 0
         while True:
@@ -697,13 +710,16 @@ class CameraLoopRunner:
                     threshold = state.scene.threshold if state.scene is not None else 0.0
                     scan_entries.append((state_name, result, threshold, held_ms, effective_hold_ms))
                     if held_ms >= effective_hold_ms:
+                        detect_ms = int((now - scan_start) * 1000)
+                        timeout_part = f", timeout={timeout_ms}ms" if timeout_ms > 0 else ""
                         self._set_preview_detector(
                             step=step,
                             detector=detector,
                             result=result,
-                            detail=f'Matched "{state_name}" after {held_ms} ms.',
+                            detail=f'Matched "{state_name}": score={result.score:.4f}/th={threshold:.4f}.',
                         )
-                        print(f'Matched state "{state_name}" while scanning {step}.')
+                        held_part = f", held={held_ms}ms" if held_ms > 0 else ""
+                        print(f'Detected "{state_name}": score={result.score:.4f}/th={threshold:.4f}{held_part}, in={detect_ms}ms{timeout_part} ({step}).')
                         return candidate
                 else:
                     matched_since[state_name] = None
@@ -791,6 +807,7 @@ class CameraLoopRunner:
         *,
         step: str,
     ) -> StateMatch | None:
+        self.controller.release_all()
         timeout_ms = runtime.definition.recovery.timeout_ms
         recovery_states = runtime.definition.recovery.states
         detectable_states = tuple(
@@ -847,7 +864,7 @@ class CameraLoopRunner:
         self._set_preview_state("resetting", detail, [])
         print(detail)
         self._note_button_press(buttons, duration_seconds=2.0)
-        self.controller.press(*buttons, down=0.15, up=1.5)
+        self.controller.press(*buttons, down=0.4, up=1.0)
 
     def _on_state_reached(
         self,

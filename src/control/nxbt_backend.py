@@ -96,6 +96,14 @@ class NxbtBackend(ControllerBackend):
         mapped_buttons = [getattr(self._nxbt_mod.Buttons, button.value) for button in buttons]
         self._service.press_buttons(self._controller_index, mapped_buttons, down=down, up=up)
 
+    def release_all(self) -> None:
+        if self._service is None or self._controller_index is None:
+            return
+        try:
+            self._service.press_buttons(self._controller_index, [], down=0.0, up=0.0)
+        except Exception:
+            pass
+
     def macro(self, commands: str, block: bool = True):
         self._require_connection()
         return self._service.macro(self._controller_index, commands, block=block)
