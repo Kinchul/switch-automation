@@ -32,7 +32,33 @@ def load_image_rgb(path: str | Path) -> np.ndarray:
 
 
 def _downsample(frame: np.ndarray, stride: int) -> np.ndarray:
-    return frame[::stride, ::stride]
+    if stride <= 1:
+        return frame.astype(np.float32, copy=False)
+
+    height, width = frame.shape[:2]
+    pad_h = (-height) % stride
+    pad_w = (-width) % stride
+    if pad_h or pad_w:
+        frame = np.pad(frame, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge")
+
+    return frame.reshape(
+        frame.shape[0] // stride,
+        stride,
+        frame.shape[1] // stride,
+        stride,
+        frame.shape[2],
+    ).mean(axis=(1, 3), dtype=np.float32)
+
+
+def _rgb_to_ycbcr(frame: np.ndarray) -> np.ndarray:
+    rgb = frame.astype(np.float32, copy=False)
+    r = rgb[..., 0]
+    g = rgb[..., 1]
+    b = rgb[..., 2]
+    y = (0.299 * r) + (0.587 * g) + (0.114 * b)
+    cb = 128.0 - (0.168736 * r) - (0.331264 * g) + (0.5 * b)
+    cr = 128.0 + (0.5 * r) - (0.418688 * g) - (0.081312 * b)
+    return np.stack((y, cb, cr), axis=-1)
 
 
 def _prepare_reference_crop(image_path: str | Path, roi: Roi, stride: int) -> tuple[Roi, np.ndarray]:
@@ -57,7 +83,7 @@ def _prepare_reference_crop(image_path: str | Path, roi: Roi, stride: int) -> tu
         )
         crop = image
 
-    reference = _downsample(crop, stride).astype(np.int16, copy=False)
+    reference = _rgb_to_ycbcr(_downsample(crop, stride))
     if reference.size == 0:
         raise ValueError(
             f"ROI for {image_path} produced an empty reference crop after downsampling. "
@@ -77,6 +103,8 @@ class StaticImageDetector:
         search_margin: int = 24,
         stride: int = 4,
         search_step: int = 2,
+        luma_weight: float = 0.7,
+        chroma_weight: float = 0.3,
     ) -> None:
         self.name = name
         self.image_path = Path(image_path)
@@ -84,6 +112,11 @@ class StaticImageDetector:
         self.search_margin = search_margin
         self.stride = stride
         self.search_step = search_step
+        total_weight = luma_weight + chroma_weight
+        if total_weight <= 0:
+            raise ValueError("luma_weight + chroma_weight must be positive.")
+        self.luma_weight = luma_weight / total_weight
+        self.chroma_weight = chroma_weight / total_weight
         self.roi, self._reference = _prepare_reference_crop(self.image_path, roi, self.stride)
         # Number of downsampled positions to advance per search step
         self._step = max(1, search_step // stride)
@@ -97,8 +130,8 @@ class StaticImageDetector:
         x2 = min(frame_w, self.roi.x + self.roi.width + self.search_margin)
 
         # Crop once, downsample in place — O(1) numpy views until astype
-        search = frame[y1:y2, x1:x2][::self.stride, ::self.stride].astype(np.int16)
-        ref = self._reference  # (H_r, W_r, C) int16, pre-downsampled
+        search = _rgb_to_ycbcr(_downsample(frame[y1:y2, x1:x2], self.stride))
+        ref = self._reference  # (H_r, W_r, C) float32, pre-downsampled
         H_r, W_r, C = ref.shape
         H_s, W_s = search.shape[:2]
 
@@ -122,8 +155,11 @@ class StaticImageDetector:
             writeable=False,
         )
 
-        # Vectorised MAE/255 for all sampled positions at once
-        scores = np.abs(windows - ref).mean(axis=(2, 3, 4)) / 255.0  # (n_y_s, n_x_s)
+        channel_mae = np.abs(windows - ref).mean(axis=(2, 3))
+        scores = (
+            (channel_mae[..., 0] * self.luma_weight)
+            + (channel_mae[..., 1:].mean(axis=2) * self.chroma_weight)
+        ) / 255.0
 
         best_flat = int(scores.argmin())
         best_y, best_x = divmod(best_flat, n_x_s)

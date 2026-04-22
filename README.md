@@ -109,10 +109,12 @@ Top-level fields:
 
 - `threshold`: number. Optional default match threshold. If omitted here, every state must define its own.
 - `search_margin`: integer. Pixel radius around the ROI within which the detector slides the template. Higher values tolerate more positional drift but are slower. Default: `24`.
-- `stride`: integer. Pixel downsampling factor applied to both the reference crop and the search area before comparison. `4` means every 4th pixel is sampled. Higher values are faster but less precise. Default: `4`.
+- `stride`: integer. Pixel pooling factor applied to both the reference crop and the search area before comparison. `4` means each `4x4` block is averaged into one comparison sample. Higher values are faster but less precise. Default: `4`.
 - `search_step`: integer. Step size in original pixels between candidate positions inside the search area. Must be ≥ `stride`; the detector converts it to downsampled steps internally. Larger values skip more positions (faster, coarser). Default: `2`.
 - `hold_ms`: integer. How long in milliseconds a match must remain continuously visible before the state is accepted. `0` means a single matching frame is enough. Default: `0`.
 - `score_window`: integer. Number of consecutive frames whose scores are averaged (trimmed mean, dropping the top 25 %) before comparing to the threshold. `1` means no averaging. Helps reject single-frame noise. Default: `1`.
+- `luma_weight`: number. Weight given to brightness differences in the detector score. Default: `0.7`.
+- `chroma_weight`: number. Weight given to color differences in the detector score. Default: `0.3`.
 
 `defaults.action` fields:
 
@@ -147,6 +149,9 @@ Scene fields:
 - `hold_ms`: integer. How long in milliseconds the match must remain continuously visible before the state is accepted. `0` accepts on the first matching frame. Useful to avoid false positives caused by transition animations or brief visual glitches — set it to the minimum time the target screen is guaranteed to be stable.
 - `score_window`: integer. Number of consecutive frames whose scores are averaged (trimmed mean, dropping the top 25 %) before comparing to the threshold. `1` means no averaging. Use `3`–`5` to filter out single-frame noise from compression artefacts or lighting spikes without adding much latency.
   In `decision_mode: "loop_baseline_step"`, this same field stabilizes the per-loop candidate score before the loop-level baseline comparison.
+
+- `luma_weight`: number. Weight given to brightness differences in the pooled `YCbCr` detector score. Increase this for static UI/text scenes.
+- `chroma_weight`: number. Weight given to color differences in the pooled `YCbCr` detector score. Increase this for color-change checks such as shiny detection.
 
 Action fields:
 

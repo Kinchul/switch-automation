@@ -12,11 +12,13 @@
   "defaults": {
     "timeout_ms": 7000,
     "scene": {
-      "search_margin": 40,
+      "search_margin": 24,
       "stride": 4,
-      "search_step": 2,
+      "search_step": 4,
       "hold_ms": 0,
-      "score_window": 3
+      "score_window": 3,
+      "luma_weight": 0.7,
+      "chroma_weight": 0.3
     },
     "action": {
       "frequency_hz": 1.0,
@@ -35,6 +37,7 @@
           "height": 334
         },
         "threshold": 0.12,
+        "search_margin": 18,
         "stride": 6,
         "search_step": 4
       },
@@ -54,6 +57,7 @@
           "height": 295
         },
         "threshold": 0.12,
+        "search_margin": 18,
         "stride": 6,
         "search_step": 4
       },
@@ -73,6 +77,7 @@
           "height": 88
         },
         "threshold": 0.08,
+        "search_margin": 8,
         "stride": 2,
         "search_step": 4
       },
@@ -94,7 +99,7 @@
         },
         "threshold": 0.08,
         "stride": 2,
-        "search_margin": 16,
+        "search_margin": 12,
         "search_step": 4
       },
       "next_states": ["ready"],
@@ -113,7 +118,7 @@
           "height": 233
         },
         "threshold": 0.18,
-        "search_margin": 24,
+        "search_margin": 12,
         "stride": 8,
         "search_step": 4
       },
@@ -134,7 +139,7 @@
         },
         "threshold": 0.09,
         "stride": 2,
-        "search_margin": 16,
+        "search_margin": 12,
         "search_step": 4
       },
       "next_states": ["target_detect"],
@@ -160,7 +165,11 @@
         },
         "threshold": 0.045,
         "search_margin": 5,
-        "hold_ms": 1000
+        "stride": 2,
+        "search_step": 2,
+        "hold_ms": 1000,
+        "luma_weight": 0.25,
+        "chroma_weight": 0.75
       },
       "next_states": ["game_launch"],
       "timeout_ms": 5000,

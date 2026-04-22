@@ -57,6 +57,8 @@ class SceneDefaults:
     search_step: int = 2
     hold_ms: int = 0
     score_window: int = 1
+    luma_weight: float = 0.7
+    chroma_weight: float = 0.3
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +71,8 @@ class SceneSpec:
     search_step: int
     hold_ms: int
     score_window: int
+    luma_weight: float
+    chroma_weight: float
 
     def build_detector(self, name: str):
         from vision.detector import Roi as DetectorRoi, StaticImageDetector
@@ -86,6 +90,8 @@ class SceneSpec:
             search_margin=self.search_margin,
             stride=self.stride,
             search_step=self.search_step,
+            luma_weight=self.luma_weight,
+            chroma_weight=self.chroma_weight,
         )
 
 
@@ -332,6 +338,13 @@ def _parse_defaults(raw_defaults: Any) -> SequenceDefaults:
     if not isinstance(action_raw, dict):
         raise SequenceConfigError("defaults.action must be an object.")
 
+    luma_weight = _as_float(scene_raw.get("luma_weight", 0.7), "defaults.scene.luma_weight")
+    chroma_weight = _as_float(scene_raw.get("chroma_weight", 0.3), "defaults.scene.chroma_weight")
+    if luma_weight < 0 or chroma_weight < 0:
+        raise SequenceConfigError("defaults.scene weights must be non-negative.")
+    if luma_weight + chroma_weight <= 0:
+        raise SequenceConfigError("defaults.scene weights must sum to a positive value.")
+
     return SequenceDefaults(
         timeout_ms=_as_int(raw_defaults.get("timeout_ms", 0), "defaults.timeout_ms"),
         scene=SceneDefaults(
@@ -345,6 +358,8 @@ def _parse_defaults(raw_defaults: Any) -> SequenceDefaults:
             search_step=_as_int(scene_raw.get("search_step", 2), "defaults.scene.search_step"),
             hold_ms=_as_int(scene_raw.get("hold_ms", 0), "defaults.scene.hold_ms"),
             score_window=_as_int(scene_raw.get("score_window", 1), "defaults.scene.score_window"),
+            luma_weight=luma_weight,
+            chroma_weight=chroma_weight,
         ),
         action=ActionDefaults(
             frequency_hz=float(action_raw.get("frequency_hz", 0)),
@@ -417,6 +432,18 @@ def _parse_scene(
     threshold_value = raw_scene.get("threshold", defaults.threshold)
     if threshold_value is None:
         raise SequenceConfigError(f'State "{state_name}" is missing scene.threshold.')
+    luma_weight = _as_float(
+        raw_scene.get("luma_weight", defaults.luma_weight),
+        f"{state_name}.scene.luma_weight",
+    )
+    chroma_weight = _as_float(
+        raw_scene.get("chroma_weight", defaults.chroma_weight),
+        f"{state_name}.scene.chroma_weight",
+    )
+    if luma_weight < 0 or chroma_weight < 0:
+        raise SequenceConfigError(f'State "{state_name}" scene weights must be non-negative.')
+    if luma_weight + chroma_weight <= 0:
+        raise SequenceConfigError(f'State "{state_name}" scene weights must sum to a positive value.')
 
     return SceneSpec(
         image_path=(path.parent / str(image_value)).resolve(),
@@ -433,6 +460,8 @@ def _parse_scene(
         ),
         hold_ms=_as_int(raw_scene.get("hold_ms", defaults.hold_ms), f"{state_name}.scene.hold_ms"),
         score_window=_as_int(raw_scene.get("score_window", defaults.score_window), f"{state_name}.scene.score_window"),
+        luma_weight=luma_weight,
+        chroma_weight=chroma_weight,
     )
 
 
@@ -499,3 +528,12 @@ def _as_int(value: Any, label: str) -> int:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise SequenceConfigError(f"{label} must be an integer.") from exc
+
+
+def _as_float(value: Any, label: str) -> float:
+    if value is None:
+        raise SequenceConfigError(f"{label} is required.")
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise SequenceConfigError(f"{label} must be a number.") from exc
