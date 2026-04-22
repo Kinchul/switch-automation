@@ -6,6 +6,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from statistics import median
 
 from control import Button, ControllerBackend, ControllerConnectCancelled
 from vision import CameraCapture, MatchResult, Roi, encode_rgb_frame
@@ -48,6 +49,11 @@ class StateMatch:
     state_name: str
     detector: object | None
     result: MatchResult | None
+    decision_score: float | None = None
+    static_threshold: float | None = None
+    dynamic_threshold: float | None = None
+    effective_threshold: float | None = None
+    decision_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -65,6 +71,26 @@ def _trimmed_mean(buf: deque, outlier_ratio: float = 0.25) -> float:
     trim = int(len(sorted_vals) * outlier_ratio)
     kept = sorted_vals[:len(sorted_vals) - trim] if trim > 0 else sorted_vals
     return sum(kept) / len(kept)
+
+
+def _match_score(match: StateMatch | None) -> float:
+    if match is None:
+        return float("inf")
+    if match.decision_score is not None:
+        return match.decision_score
+    if match.result is not None:
+        return match.result.score
+    return float("inf")
+
+
+def _effective_threshold(match: StateMatch | None) -> float | None:
+    if match is None:
+        return None
+    if match.effective_threshold is not None:
+        return match.effective_threshold
+    if match.static_threshold is not None:
+        return match.static_threshold
+    return None
 
 
 class StopRequested(Exception):
@@ -110,6 +136,9 @@ class CameraLoopRunner:
         self._timeout_reset_count = 0
         self._entered_initial_state_once = False
         self._frame_buffer: deque = deque(maxlen=5)
+        self._current_loop_decision_scores: dict[str, dict[str, float]] = {}
+        self._previous_loop_decision_scores: dict[str, dict[str, float]] = {}
+        self._failed_loop_score_history: dict[str, dict[str, deque[float]]] = {}
 
     def initialize(self) -> LoopStatsSnapshot:
         self.control.set_command("noop")
@@ -196,6 +225,9 @@ class CameraLoopRunner:
             self._latest_outcome_frame_path = None
             self._latest_state_roi_path = None
             self._entered_initial_state_once = False
+            self._current_loop_decision_scores[runtime.sequence_id] = {}
+            if command == "restart":
+                self._previous_loop_decision_scores[runtime.sequence_id] = {}
             stats = self.stats.start_new_loop(runtime.sequence_id)
             self._last_checkpoint_monotonic = time.monotonic()
             skip_startup_recovery = False
@@ -301,6 +333,7 @@ class CameraLoopRunner:
             self._entered_initial_state_once = True
             return None
 
+        self._promote_loop_decision_scores(runtime.sequence_id)
         snapshot = self.stats.record_retry(runtime.sequence_id)
         print(f'Completed loop {snapshot.loop_counter} for sequence "{runtime.sequence_id}".')
         if max_loops and snapshot.loop_counter >= max_loops:
@@ -328,8 +361,9 @@ class CameraLoopRunner:
 
         if state.reset_loop:
             frame = self.capture.get_frame()
-            saved = self._save_target_failed_roi(frame, runtime.sequence_id, state, entry_match.result)
+            saved = self._save_target_failed_roi(frame, runtime.sequence_id, state, entry_match)
             pre_snapshot = self.stats.snapshot(runtime.sequence_id)
+            self._promote_loop_decision_scores(runtime.sequence_id)
             snapshot = self.stats.record_retry(runtime.sequence_id)
             print(
                 f'State "{state.name}" reset loop — loop {snapshot.loop_counter}.'
@@ -337,6 +371,9 @@ class CameraLoopRunner:
             )
             self._print_timers(runtime.sequence_id, pre_snapshot)
             raise ResetRequested(timers_printed=True)
+
+        if state.decision_mode == "loop_baseline_step":
+            return self._run_loop_baseline_step(runtime, state)
 
         immediate_transition = self._immediate_transition(runtime, state)
         if immediate_transition is not None:
@@ -370,14 +407,37 @@ class CameraLoopRunner:
             now = time.monotonic()
             if deadline is not None and now >= deadline:
                 score_detail = ""
-                if last_best_match is not None and last_best_match.result is not None:
-                    score_detail = f" Best score: {last_best_match.state_name}={last_best_match.result.score:.4f}."
+                if last_best_match is not None:
+                    score_detail = f" Last candidate: {self._describe_match_decision(last_best_match)}."
                 if state.timeout_next_state is not None:
                     tns = state.timeout_next_state
                     print(f'Timeout in state "{state.name}": no {state.next_states} detected, transitioning to "{tns}".{score_detail}')
+                    transition_match = self._synthetic_state_match(runtime, tns)
+                    if (
+                        transition_match.result is None
+                        and last_best_match is not None
+                        and last_best_match.result is not None
+                    ):
+                        transition_match = StateMatch(
+                            state_name=tns,
+                            detector=last_best_match.detector,
+                            result=last_best_match.result,
+                            decision_score=last_best_match.decision_score,
+                            static_threshold=last_best_match.static_threshold,
+                            dynamic_threshold=last_best_match.dynamic_threshold,
+                            effective_threshold=last_best_match.effective_threshold,
+                            decision_reason=last_best_match.decision_reason,
+                        )
+                    self._print_target_decision(
+                        state_name=state.name,
+                        next_state=tns,
+                        criterion="timeout_next_state",
+                        detail=self._describe_match_decision(last_best_match),
+                    )
                     return StateTransition(
                         next_state=tns,
-                        match=self._synthetic_state_match(runtime, tns),
+                        match=transition_match,
+                        detail="criterion=timeout_next_state",
                     )
                 return self._handle_timeout(runtime, state, f'Timeout in state "{state.name}".{score_detail}')
 
@@ -403,12 +463,21 @@ class CameraLoopRunner:
             if transition is not None:
                 detect_ms = int((time.monotonic() - state_entry_time) * 1000)
                 matched_state = runtime.definition.states[transition.next_state]
-                th = matched_state.scene.threshold if matched_state.scene else 0.0
-                score = transition.match.result.score if transition.match.result else float("nan")
+                th = _effective_threshold(transition.match)
+                if th is None:
+                    th = matched_state.scene.threshold if matched_state.scene else 0.0
+                score = _match_score(transition.match)
                 timeout_part = f", timeout={state.timeout_ms}ms" if state.timeout_ms > 0 else ""
                 extra = f", {transition.detail}" if transition.detail else ""
                 held_part = f", held={transition.held_ms}ms" if transition.held_ms > 0 else ""
                 print(f'Detected "{transition.next_state}": score={score:.4f}/th={th:.4f}{held_part}{extra}, in={detect_ms}ms{timeout_part}.')
+                if transition.next_state.startswith("target_") or state.name.startswith("target_"):
+                    self._print_target_decision(
+                        state_name=state.name,
+                        next_state=transition.next_state,
+                        criterion="detector_match",
+                        detail=self._describe_match_decision(transition.match),
+                    )
                 return transition
 
             if best_match is not None:
@@ -460,6 +529,167 @@ class CameraLoopRunner:
             match=self._synthetic_state_match(runtime, first_next),
         )
 
+    def _run_loop_baseline_step(
+        self,
+        runtime: SequenceRuntime,
+        state: StateSpec,
+    ) -> StateTransition:
+        next_state_name = state.next_states[0]
+        next_state = runtime.definition.states[next_state_name]
+        detector = runtime.detector_for(next_state_name)
+        if detector is None or next_state.scene is None or state.timeout_next_state is None:
+            raise SequenceConfigError(
+                f'State "{state.name}" loop_baseline_step is missing detector configuration.'
+            )
+
+        threshold = next_state.scene.threshold
+        score_window = max(1, next_state.scene.score_window)
+        buf = deque(maxlen=score_window) if score_window > 1 else None
+        observed_scores: list[float] = []
+        last_candidate: StateMatch | None = None
+        deadline = time.monotonic() + (state.timeout_ms / 1000.0)
+        state_entry_time = time.monotonic()
+
+        while True:
+            self._abort_if_control_requested()
+            now = time.monotonic()
+            if now >= deadline:
+                break
+
+            frame = self.capture.get_frame()
+            self._frame_buffer.append(frame)
+            result = detector.match(frame)
+            candidate = StateMatch(
+                next_state_name,
+                detector,
+                result,
+                decision_score=result.score,
+                static_threshold=threshold,
+                effective_threshold=threshold,
+            )
+            if buf is not None:
+                buf.append(result.score)
+                if len(buf) == buf.maxlen:
+                    candidate.decision_score = _trimmed_mean(buf)
+                    observed_scores.append(candidate.decision_score)
+                else:
+                    candidate.decision_reason = f"window_not_ready {len(buf)}/{buf.maxlen}"
+            else:
+                observed_scores.append(result.score)
+            last_candidate = candidate
+
+            preview_detail = f'Observing "{next_state_name}" for loop decision: score={_match_score(candidate):.4f}.'
+            self._set_preview_detector(
+                step=f'State "{state.name}"',
+                detector=detector,
+                result=result,
+                detail=preview_detail,
+            )
+
+            sleep_for = min(self.config.match_poll_interval, max(0.0, deadline - time.monotonic()))
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+
+        if last_candidate is None:
+            return StateTransition(
+                next_state=state.timeout_next_state,
+                match=self._synthetic_state_match(runtime, state.timeout_next_state),
+                detail="criterion=loop_baseline_step_empty",
+            )
+
+        loop_score = float(median(observed_scores)) if observed_scores else _match_score(last_candidate)
+        baseline, trend, predicted_failed = self._predict_failed_loop_score(runtime.sequence_id, state)
+        ok_step = state.decision_ok_step
+        detect_ms = int((time.monotonic() - state_entry_time) * 1000)
+
+        decision_match = StateMatch(
+            state_name=next_state_name,
+            detector=last_candidate.detector,
+            result=last_candidate.result,
+            decision_score=loop_score,
+            static_threshold=threshold,
+            dynamic_threshold=predicted_failed,
+            effective_threshold=(predicted_failed + ok_step) if predicted_failed is not None else threshold,
+        )
+
+        if predicted_failed is None:
+            if loop_score <= threshold:
+                winner_name = next_state_name
+                reason = "bootstrap_failed_static_threshold"
+            else:
+                winner_name = state.timeout_next_state
+                reason = "bootstrap_ok_above_static_threshold"
+            detail = (
+                f"score={loop_score:.4f}, static_th={threshold:.4f}, "
+                f"criterion={reason}, observed={len(observed_scores)}"
+            )
+        else:
+            jump = loop_score - predicted_failed
+            if jump >= ok_step:
+                winner_name = state.timeout_next_state
+                reason = "ok_step_detected"
+            else:
+                winner_name = next_state_name
+                reason = "failed_baseline_regime"
+            detail = (
+                f"score={loop_score:.4f}, predicted_failed={predicted_failed:.4f}, "
+                f"baseline={baseline:.4f}, trend={trend:.4f}, jump={jump:+.4f}, "
+                f"ok_step={ok_step:.4f}, criterion={reason}, observed={len(observed_scores)}"
+            )
+
+        decision_match.decision_reason = reason
+
+        if winner_name == next_state_name:
+            self._remember_failed_loop_score(runtime.sequence_id, state.name, loop_score, state.decision_history_window)
+            transition_match = decision_match
+        else:
+            transition_match = StateMatch(
+                state_name=winner_name,
+                detector=decision_match.detector,
+                result=decision_match.result,
+                decision_score=decision_match.decision_score,
+                static_threshold=decision_match.static_threshold,
+                dynamic_threshold=decision_match.dynamic_threshold,
+                effective_threshold=decision_match.effective_threshold,
+                decision_reason=decision_match.decision_reason,
+            )
+
+        self._print_target_decision(
+            state_name=state.name,
+            next_state=winner_name,
+            criterion="loop_baseline_step",
+            detail=detail,
+        )
+        return StateTransition(
+            next_state=winner_name,
+            match=transition_match,
+            detail=f"criterion=loop_baseline_step, observe_ms={detect_ms}, {detail}",
+            held_ms=0,
+        )
+
+    def _predict_failed_loop_score(
+        self,
+        sequence_id: str,
+        state: StateSpec,
+    ) -> tuple[float | None, float, float | None]:
+        history = list(self._failed_loop_score_history.get(sequence_id, {}).get(state.name, ()))
+        if not history:
+            return None, 0.0, None
+
+        history_window = max(1, state.decision_history_window)
+        history = history[-history_window:]
+        baseline = float(median(history))
+
+        trend_window = max(1, state.decision_trend_window)
+        if len(history) < 2:
+            trend = 0.0
+        else:
+            deltas = [curr - prev for prev, curr in zip(history[:-1], history[1:])]
+            deltas = deltas[-trend_window:]
+            trend = float(median(deltas)) if deltas else 0.0
+
+        return baseline, trend, baseline + trend
+
     def _find_next_transition(
         self,
         runtime: SequenceRuntime,
@@ -478,19 +708,32 @@ class CameraLoopRunner:
 
             next_state = runtime.definition.states[next_state_name]
             result = detector.match(frame)
-            candidate = StateMatch(next_state_name, detector, result)
+            candidate = StateMatch(next_state_name, detector, result, decision_score=result.score)
             if preferred_preview_match is None:
                 preferred_preview_match = candidate
-            if best_match is None or result.score < best_match.result.score:
-                best_match = candidate
 
             threshold = next_state.scene.threshold if next_state.scene else 0.0
+            candidate.static_threshold = threshold
             buf = score_buffers.get(next_state_name) if score_buffers else None
             if buf is not None:
                 buf.append(result.score)
-                is_matched = len(buf) == buf.maxlen and _trimmed_mean(buf) < threshold
+                current_mean = _trimmed_mean(buf)
+                candidate.decision_score = current_mean
+                is_matched = len(buf) == buf.maxlen and current_mean < threshold
+                candidate.effective_threshold = threshold
+                if len(buf) < buf.maxlen:
+                    candidate.decision_reason = f"window_not_ready {len(buf)}/{buf.maxlen}"
+                elif candidate.decision_score is not None and candidate.decision_score >= threshold:
+                    candidate.decision_reason = "score_above_threshold"
+                else:
+                    candidate.decision_reason = "score_passed_threshold"
             else:
                 is_matched = result.matched
+                candidate.effective_threshold = threshold
+                candidate.decision_reason = "score_passed_threshold" if is_matched else "score_above_threshold"
+
+            if best_match is None or _match_score(candidate) < _match_score(best_match):
+                best_match = candidate
 
             if is_matched:
                 started = matched_since[next_state_name]
@@ -500,13 +743,16 @@ class CameraLoopRunner:
                 held_ms = int(max(0.0, now - started) * 1000)
                 required_hold_ms = max(0, next_state.scene.hold_ms if next_state.scene else 0)
                 if held_ms >= required_hold_ms:
+                    score_used = _match_score(candidate)
+                    candidate.decision_reason = "accepted"
                     self._set_preview_detector(
                         step=f'State "{state.name}"',
                         detector=detector,
                         result=result,
-                        detail=f'Matched "{next_state_name}": score={result.score:.4f}/th={threshold:.4f}.',
+                        detail=f'Matched "{next_state_name}": score={score_used:.4f}/th={threshold:.4f}.',
                     )
                     return StateTransition(next_state=next_state_name, match=candidate, held_ms=held_ms), candidate
+                candidate.decision_reason = f"hold_pending {held_ms}/{required_hold_ms}ms"
             else:
                 matched_since[next_state_name] = None
 
@@ -526,12 +772,12 @@ class CameraLoopRunner:
             if detector is None:
                 continue
             result = detector.match(frame)
-            candidates.append(StateMatch(next_state_name, detector, result))
+            candidates.append(StateMatch(next_state_name, detector, result, decision_score=result.score))
 
         if not candidates:
             return None, None
 
-        candidates.sort(key=lambda candidate: candidate.result.score if candidate.result is not None else float("inf"))
+        candidates.sort(key=_match_score)
         preview_match = candidates[0]
         matched_candidates = [
             candidate
@@ -549,8 +795,9 @@ class CameraLoopRunner:
         if best_result is None:
             return None, preview_match
 
-        runner_up_score = runner_up.result.score if runner_up is not None and runner_up.result is not None else float("inf")
-        score_margin = runner_up_score - best_result.score
+        runner_up_score = _match_score(runner_up)
+        best_score = _match_score(best_match)
+        score_margin = runner_up_score - best_score
         winner_name = best_match.state_name
 
         if runner_up is not None and score_margin < state.decision_margin:
@@ -573,7 +820,7 @@ class CameraLoopRunner:
                 step=f'State "{state.name}"',
                 detector=best_match.detector,
                 result=best_result,
-                detail=f'Decided "{winner_name}": score={best_result.score:.4f}/th={winner_threshold:.4f}.',
+                detail=f'Decided "{winner_name}": score={best_score:.4f}/th={winner_threshold:.4f}.',
             )
             return (
                 StateTransition(next_state=winner_name, match=best_match, detail=margin_detail, held_ms=held_ms),
@@ -595,7 +842,7 @@ class CameraLoopRunner:
     ) -> LoopOutcome:
         frame = self.capture.get_frame()
         detail = f'Reached terminal state "{state.name}" in sequence "{runtime.sequence_id}".'
-        directory = self._save_target_ok(frame, runtime.sequence_id, state, match.result)
+        directory = self._save_target_ok(frame, runtime.sequence_id, state, match)
         detail = f"{detail} Saved to {directory}."
 
         if state.notification == "mail":
@@ -686,18 +933,21 @@ class CameraLoopRunner:
                 if detector is None:
                     continue
                 result = detector.match(frame)
-                candidate = StateMatch(state_name, detector, result)
+                candidate = StateMatch(state_name, detector, result, decision_score=result.score)
                 boxes.extend(self._boxes_for_state(state_name, state.scene, result))
-                if best_match is None or result.score < best_match.result.score:
-                    best_match = candidate
 
                 buf = score_buffers.get(state_name)
                 if buf is not None:
                     buf.append(result.score)
                     threshold = state.scene.threshold if state.scene is not None else 0.0
-                    is_matched = len(buf) == buf.maxlen and _trimmed_mean(buf) < threshold
+                    current_mean = _trimmed_mean(buf)
+                    candidate.decision_score = current_mean
+                    is_matched = len(buf) == buf.maxlen and current_mean < threshold
                 else:
                     is_matched = result.matched
+
+                if best_match is None or _match_score(candidate) < _match_score(best_match):
+                    best_match = candidate
 
                 if is_matched:
                     started = matched_since[state_name]
@@ -712,14 +962,15 @@ class CameraLoopRunner:
                     if held_ms >= effective_hold_ms:
                         detect_ms = int((now - scan_start) * 1000)
                         timeout_part = f", timeout={timeout_ms}ms" if timeout_ms > 0 else ""
+                        score_used = _match_score(candidate)
                         self._set_preview_detector(
                             step=step,
                             detector=detector,
                             result=result,
-                            detail=f'Matched "{state_name}": score={result.score:.4f}/th={threshold:.4f}.',
+                            detail=f'Matched "{state_name}": score={score_used:.4f}/th={threshold:.4f}.',
                         )
                         held_part = f", held={held_ms}ms" if held_ms > 0 else ""
-                        print(f'Detected "{state_name}": score={result.score:.4f}/th={threshold:.4f}{held_part}, in={detect_ms}ms{timeout_part} ({step}).')
+                        print(f'Detected "{state_name}": score={score_used:.4f}/th={threshold:.4f}{held_part}, in={detect_ms}ms{timeout_part} ({step}).')
                         return candidate
                 else:
                     matched_since[state_name] = None
@@ -758,7 +1009,12 @@ class CameraLoopRunner:
         result = None
         if detector is not None:
             result = detector.match(self.capture.get_frame())
-        return StateMatch(state_name=state_name, detector=detector, result=result)
+        return StateMatch(
+            state_name=state_name,
+            detector=detector,
+            result=result,
+            decision_score=result.score if result is not None else None,
+        )
 
     def _handle_timeout(
         self,
@@ -872,6 +1128,7 @@ class CameraLoopRunner:
         state: StateSpec,
         match: StateMatch,
     ) -> None:
+        self._record_loop_decision_score(runtime.sequence_id, state.name, match)
         detail = f'Entered state "{state.name}" in sequence "{runtime.sequence_id}".'
         self._set_preview_detector(
             step=f'State "{state.name}"',
@@ -880,6 +1137,62 @@ class CameraLoopRunner:
             detail=detail,
         )
         print(detail)
+
+    def _record_loop_decision_score(self, sequence_id: str, state_name: str, match: StateMatch) -> None:
+        score = _match_score(match)
+        if score == float("inf"):
+            return
+        self._current_loop_decision_scores.setdefault(sequence_id, {})[state_name] = score
+
+    def _remember_failed_loop_score(
+        self,
+        sequence_id: str,
+        state_name: str,
+        score: float,
+        maxlen: int,
+    ) -> None:
+        histories = self._failed_loop_score_history.setdefault(sequence_id, {})
+        history = histories.get(state_name)
+        if history is None or history.maxlen != maxlen:
+            existing = list(history) if history is not None else []
+            history = deque(existing[-maxlen:], maxlen=maxlen)
+            histories[state_name] = history
+        history.append(score)
+
+    def _promote_loop_decision_scores(self, sequence_id: str) -> None:
+        current = self._current_loop_decision_scores.get(sequence_id, {})
+        if current:
+            self._previous_loop_decision_scores[sequence_id] = dict(current)
+        self._current_loop_decision_scores[sequence_id] = {}
+
+    def _previous_loop_decision_score(self, sequence_id: str, state_name: str) -> float | None:
+        return self._previous_loop_decision_scores.get(sequence_id, {}).get(state_name)
+
+    def _describe_match_decision(self, match: StateMatch | None) -> str:
+        if match is None:
+            return "no candidate"
+        score = _match_score(match)
+        effective_th = _effective_threshold(match)
+        threshold_part = ""
+        if effective_th is not None:
+            threshold_part = f"/eff_th={effective_th:.4f}"
+            if match.static_threshold is not None:
+                threshold_part += f" (static={match.static_threshold:.4f}"
+                if match.dynamic_threshold is not None:
+                    threshold_part += f", dyn={match.dynamic_threshold:.4f}"
+                threshold_part += ")"
+        reason_part = f", reason={match.decision_reason}" if match.decision_reason else ""
+        return f'{match.state_name}={score:.4f}{threshold_part}{reason_part}'
+
+    def _print_target_decision(
+        self,
+        *,
+        state_name: str,
+        next_state: str,
+        criterion: str,
+        detail: str,
+    ) -> None:
+        print(f'=== TARGET DECISION: {state_name} -> {next_state} | criterion={criterion} | {detail} ===')
 
     def _pair_controller(self) -> None:
         if self._controller_connected:
@@ -1118,20 +1431,16 @@ class CameraLoopRunner:
         frame,
         sequence_id: str,
         state: StateSpec,
-        result: MatchResult | None,
+        match: StateMatch,
     ) -> Path | None:
-        if state.scene is None or result is None:
+        roi = self._resolve_match_roi(state, detector=match.detector, result=match.result)
+        if roi is None:
             return None
-        roi = Roi(
-            x=state.scene.roi.x + result.offset_x,
-            y=state.scene.roi.y + result.offset_y,
-            width=state.scene.roi.width,
-            height=state.scene.roi.height,
-        )
         cropped = roi.crop(frame)
         directory = self.config.debug_dir / sequence_id / "target_failed"
         directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{time.strftime('%Y%m%d-%H%M%S')}-score-{result.score:.4f}.jpg"
+        score_used = _match_score(match)
+        path = directory / f"{time.strftime('%Y%m%d-%H%M%S')}-score-{score_used:.4f}.jpg"
         path.write_bytes(encode_rgb_frame(cropped, quality=95))
         self._latest_state_roi_path = path
         return path
@@ -1149,7 +1458,7 @@ class CameraLoopRunner:
         frame,
         sequence_id: str,
         state: StateSpec,
-        result: MatchResult | None,
+        match: StateMatch,
     ) -> Path:
         directory = self.config.debug_dir / sequence_id / "target_ok"
         directory.mkdir(parents=True, exist_ok=True)
@@ -1160,17 +1469,39 @@ class CameraLoopRunner:
         full_path = directory / f"{ts}-full.jpg"
         full_path.write_bytes(encode_rgb_frame(frame, quality=95))
         self._latest_outcome_frame_path = full_path
-        if state.scene is not None and result is not None:
-            roi = Roi(
+        roi = self._resolve_match_roi(state, detector=match.detector, result=match.result)
+        if roi is not None:
+            roi_path = directory / f"{ts}-roi.jpg"
+            roi_path.write_bytes(encode_rgb_frame(roi.crop(frame), quality=95))
+            self._latest_state_roi_path = roi_path
+        return directory
+
+    def _resolve_match_roi(
+        self,
+        state: StateSpec,
+        *,
+        detector,
+        result: MatchResult | None,
+    ) -> Roi | None:
+        if result is None:
+            return None
+        if state.scene is not None:
+            return Roi(
                 x=state.scene.roi.x + result.offset_x,
                 y=state.scene.roi.y + result.offset_y,
                 width=state.scene.roi.width,
                 height=state.scene.roi.height,
             )
-            roi_path = directory / f"{ts}-roi.jpg"
-            roi_path.write_bytes(encode_rgb_frame(roi.crop(frame), quality=95))
-            self._latest_state_roi_path = roi_path
-        return directory
+
+        detector_roi = getattr(detector, "roi", None) if detector is not None else None
+        if detector_roi is None:
+            return None
+        return Roi(
+            x=detector_roi.x + result.offset_x,
+            y=detector_roi.y + result.offset_y,
+            width=detector_roi.width,
+            height=detector_roi.height,
+        )
 
     def _load_selected_runtime(self) -> SequenceRuntime:
         self.control.refresh()

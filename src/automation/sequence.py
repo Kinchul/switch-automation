@@ -99,6 +99,9 @@ class StateSpec:
     timeout_next_state: str | None = None
     decision_mode: str = ""
     decision_margin: float = 0.0
+    decision_history_window: int = 9
+    decision_trend_window: int = 5
+    decision_ok_step: float = 0.0
     reset_loop: bool = False
     notification: str = ""
 
@@ -238,7 +241,7 @@ def _validate_sequence(definition: SequenceDefinition) -> None:
             raise SequenceConfigError(
                 f'State "{state.name}" uses unsupported notification "{state.notification}".'
             )
-        if state.decision_mode not in {"", "best_score"}:
+        if state.decision_mode not in {"", "best_score", "loop_baseline_step"}:
             raise SequenceConfigError(
                 f'State "{state.name}" uses unsupported decision_mode "{state.decision_mode}".'
             )
@@ -246,7 +249,19 @@ def _validate_sequence(definition: SequenceDefinition) -> None:
             raise SequenceConfigError(
                 f'State "{state.name}" decision_margin must be non-negative.'
             )
-        if state.decision_mode:
+        if state.decision_history_window <= 0:
+            raise SequenceConfigError(
+                f'State "{state.name}" decision_history_window must be positive.'
+            )
+        if state.decision_trend_window <= 0:
+            raise SequenceConfigError(
+                f'State "{state.name}" decision_trend_window must be positive.'
+            )
+        if state.decision_ok_step < 0:
+            raise SequenceConfigError(
+                f'State "{state.name}" decision_ok_step must be non-negative.'
+            )
+        if state.decision_mode == "best_score":
             if len(state.next_states) < 2:
                 raise SequenceConfigError(
                     f'State "{state.name}" decision_mode requires at least two next_states.'
@@ -256,6 +271,24 @@ def _validate_sequence(definition: SequenceDefinition) -> None:
                     raise SequenceConfigError(
                         f'State "{state.name}" decision_mode requires detectable next_states; "{next_state}" has no scene.'
                     )
+        if state.decision_mode == "loop_baseline_step":
+            if len(state.next_states) != 1:
+                raise SequenceConfigError(
+                    f'State "{state.name}" loop_baseline_step requires exactly one detectable next_state.'
+                )
+            next_state = state.next_states[0]
+            if definition.states[next_state].scene is None:
+                raise SequenceConfigError(
+                    f'State "{state.name}" loop_baseline_step requires detectable next_state "{next_state}".'
+                )
+            if state.timeout_next_state is None:
+                raise SequenceConfigError(
+                    f'State "{state.name}" loop_baseline_step requires timeout_next_state.'
+                )
+            if state.timeout_ms <= 0:
+                raise SequenceConfigError(
+                    f'State "{state.name}" loop_baseline_step requires timeout_ms > 0.'
+                )
         if state.timeout_next_state is not None:
             if state.timeout_next_state not in state_names:
                 raise SequenceConfigError(
@@ -348,6 +381,15 @@ def _parse_state(
         timeout_next_state=str(timeout_next_state_raw) if timeout_next_state_raw not in (None, "") else None,
         decision_mode=str(raw_state.get("decision_mode") or ""),
         decision_margin=float(raw_state.get("decision_margin", 0.0) or 0.0),
+        decision_history_window=_as_int(
+            raw_state.get("decision_history_window", 9),
+            f"{state_name}.decision_history_window",
+        ),
+        decision_trend_window=_as_int(
+            raw_state.get("decision_trend_window", 5),
+            f"{state_name}.decision_trend_window",
+        ),
+        decision_ok_step=float(raw_state.get("decision_ok_step", 0.0) or 0.0),
         reset_loop=bool(raw_state.get("reset_loop", False)),
         notification=str(raw_state.get("notification") or ""),
     )

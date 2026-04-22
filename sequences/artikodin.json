@@ -39,7 +39,7 @@
         "search_step": 4
       },
       "next_states": ["press_start"],
-      "timeout_ms": 5000,
+      "timeout_ms": 6000,
       "action": {
         "buttons": ["A"]
       }
@@ -58,7 +58,7 @@
         "search_step": 4
       },
       "next_states": ["previously", "ready"],
-      "timeout_ms": 8000,
+      "timeout_ms": 6000,
       "action": {
         "buttons": ["A"]
       }
@@ -92,7 +92,7 @@
           "width": 303,
           "height": 56
         },
-        "threshold": 0.08,
+        "threshold": 0.09,
         "stride": 2,
         "search_margin": 16,
         "search_step": 4
@@ -132,9 +132,9 @@
           "width": 197,
           "height": 56
         },
-        "threshold": 0.08,
-        "stride": 2,
-        "search_margin": 16,
+        "threshold": 0.1,
+        "stride": 4,
+        "search_margin": 24,
         "search_step": 4
       },
       "next_states": ["target_detect"],
@@ -143,7 +143,11 @@
     "target_detect": {
       "next_states": ["target_failed"],
       "timeout_ms": 3000,
-      "timeout_next_state": "target_ok"
+      "timeout_next_state": "target_ok",
+      "decision_mode": "loop_baseline_step",
+      "decision_history_window": 11,
+      "decision_trend_window": 5,
+      "decision_ok_step": 0.005
     },
     "target_failed": {
       "scene": {
@@ -154,14 +158,13 @@
           "width": 343,
           "height": 358
         },
-        "threshold": 0.035,
-        "search_margin": 2,
+        "threshold": 0.04,
+        "search_margin": 5,
         "stride": 2,
         "search_step": 2,
-        "hold_ms": 1000
+        "score_window": 3
       },
       "next_states": ["game_launch"],
-      "timeout_ms": 5000,
       "reset_loop": true
     },
     "target_ok": {

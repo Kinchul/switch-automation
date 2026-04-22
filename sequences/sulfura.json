@@ -143,7 +143,11 @@
     "target_detect": {
       "next_states": ["target_failed"],
       "timeout_ms": 3000,
-      "timeout_next_state": "target_ok"
+      "timeout_next_state": "target_ok",
+      "decision_mode": "loop_baseline_step",
+      "decision_history_window": 11,
+      "decision_trend_window": 5,
+      "decision_ok_step": 0.002
     },
     "target_failed": {
       "scene": {
