@@ -133,7 +133,7 @@ State fields:
 - `decision_margin`: number. Minimum score gap between first and second place required by `decision_mode: "best_score"`. Default: `0.0`.
 - `decision_history_window`: integer. Only used by `decision_mode: "loop_baseline_step"`. Number of recent failed loop scores to keep for the learned failed baseline. Default: `9`.
 - `decision_trend_window`: integer. Only used by `decision_mode: "loop_baseline_step"`. Number of recent failed loop-to-loop deltas used to estimate slow drift. Default: `5`.
-- `decision_ok_step`: number. Only used by `decision_mode: "loop_baseline_step"`. Minimum absolute jump above the predicted failed score required to classify the loop as `timeout_next_state`. Default: `0.0`.
+- `decision_ok_step`: number. Only used by `decision_mode: "loop_baseline_step"`. Minimum absolute jump above the predicted failed score required to classify the loop as `timeout_next_state`. During bootstrap, when no failed baseline has been learned yet, this same value is added to the static threshold before allowing `timeout_next_state`. Default: `0.0`.
 - `reset_loop`: boolean. If `true`, reaching this state increments the loop counter, saves a ROI snapshot, and restarts the sequence from the initial state. Used on failure states. Default: `false`.
 - `notification`: string. `""` (default): no notification. `"mail"`: sends an email notification when this state is reached. Used on terminal success states.
 

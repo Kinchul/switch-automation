@@ -60,6 +60,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--warmup", type=float, default=2.0)
     parser.add_argument(
+        "--camera-controls-file",
+        type=Path,
+        default=ROOT / "debug" / "camera" / "camera_controls.json",
+        help="JSON file containing fixed camera exposure/white-balance controls.",
+    )
+    parser.add_argument(
+        "--recalibrate-camera-controls",
+        action="store_true",
+        help="Ignore any saved camera controls once, then save freshly locked values.",
+    )
+    parser.add_argument(
         "--adapter-path",
         type=str,
         default=None,
@@ -302,6 +313,9 @@ def main() -> int:
     if args.action != "run":
         return _handle_control_action(args)
 
+    if args.recalibrate_camera_controls and args.camera_controls_file.exists():
+        args.camera_controls_file.unlink()
+
     lock_handle = _acquire_service_lock(args.service_lock)
     if lock_handle is None:
         return 2
@@ -317,6 +331,7 @@ def main() -> int:
         height=args.height,
         fps=args.fps,
         warmup=args.warmup,
+        controls_path=args.camera_controls_file,
     )
 
     controller = NxbtBackend(

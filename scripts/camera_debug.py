@@ -24,6 +24,17 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--height", type=int, default=1080)
     common.add_argument("--fps", type=int, default=20)
     common.add_argument("--warmup", type=float, default=2.0)
+    common.add_argument(
+        "--camera-controls-file",
+        type=Path,
+        default=ROOT / "debug" / "camera" / "camera_controls.json",
+        help="JSON file containing fixed camera exposure/white-balance controls.",
+    )
+    common.add_argument(
+        "--recalibrate-camera-controls",
+        action="store_true",
+        help="Ignore any saved camera controls once, then save freshly locked values.",
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -94,12 +105,15 @@ def _guess_ip_addresses() -> list[str]:
 
 
 def _capture(args: argparse.Namespace):
+    if args.recalibrate_camera_controls and args.camera_controls_file.exists():
+        args.camera_controls_file.unlink()
     return open_capture(
         camera_index=args.camera_index,
         width=args.width,
         height=args.height,
         fps=args.fps,
         warmup=args.warmup,
+        controls_path=args.camera_controls_file,
     )
 
 

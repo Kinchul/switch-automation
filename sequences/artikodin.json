@@ -31,10 +31,10 @@
       "scene": {
         "image_path": "../images/artikodin/0_game_launch.png",
         "roi": {
-          "x": 581,
-          "y": 386,
-          "width": 668,
-          "height": 330
+          "x": 598,
+          "y": 416,
+          "width": 637,
+          "height": 304
         },
         "threshold": 0.08,
         "search_margin": 18,
@@ -51,10 +51,10 @@
       "scene": {
         "image_path": "../images/artikodin/1_press_start.png",
         "roi": {
-          "x": 770,
-          "y": 892,
-          "width": 401,
-          "height": 67
+          "x": 780,
+          "y": 920,
+          "width": 383,
+          "height": 53
         },
         "threshold": 0.08,
         "search_margin": 18,
@@ -71,10 +71,10 @@
       "scene": {
         "image_path": "../images/artikodin/2_select_save.png",
         "roi": {
-          "x": 478,
-          "y": 228,
-          "width": 262,
-          "height": 71
+          "x": 485,
+          "y": 252,
+          "width": 245,
+          "height": 56
         },
         "threshold": 0.08,
         "search_margin": 8,
@@ -92,12 +92,12 @@
       "scene": {
         "image_path": "../images/artikodin/3_previously.png",
         "roi": {
-          "x": 391,
-          "y": 204,
-          "width": 303,
-          "height": 56
+          "x": 394,
+          "y": 226,
+          "width": 294,
+          "height": 48
         },
-        "threshold": 0.04,
+        "threshold": 0.08,
         "stride": 2,
         "search_margin": 12,
         "search_step": 4
@@ -112,10 +112,10 @@
       "scene": {
         "image_path": "../images/artikodin/4_ready.png",
         "roi": {
-          "x": 757,
-          "y": 482,
-          "width": 207,
-          "height": 146
+          "x": 765,
+          "y": 516,
+          "width": 181,
+          "height": 115
         },
         "threshold": 0.08,
         "search_margin": 12,
@@ -132,10 +132,10 @@
       "scene": {
         "image_path": "../images/artikodin/5_target_failed.png",
         "roi": {
-          "x": 458,
-          "y": 275,
-          "width": 197,
-          "height": 56
+          "x": 457,
+          "y": 294,
+          "width": 186,
+          "height": 46
         },
         "threshold": 0.1,
         "search_margin": 12,
@@ -158,10 +158,10 @@
       "scene": {
         "image_path": "../images/artikodin/5_target_failed.png",
         "roi": {
-          "x": 1020,
-          "y": 196,
-          "width": 343,
-          "height": 358
+          "x": 1048,
+          "y": 214,
+          "width": 289,
+          "height": 308
         },
         "threshold": 0.04,
         "search_margin": 4,

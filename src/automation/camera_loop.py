@@ -613,14 +613,16 @@ class CameraLoopRunner:
         )
 
         if predicted_failed is None:
-            if loop_score <= threshold:
+            bootstrap_threshold = threshold + ok_step
+            if loop_score <= bootstrap_threshold:
                 winner_name = next_state_name
-                reason = "bootstrap_failed_static_threshold"
+                reason = "bootstrap_failed_static_plus_ok_step"
             else:
                 winner_name = state.timeout_next_state
-                reason = "bootstrap_ok_above_static_threshold"
+                reason = "bootstrap_ok_above_static_plus_ok_step"
             detail = (
                 f"score={loop_score:.4f}, static_th={threshold:.4f}, "
+                f"bootstrap_th={bootstrap_threshold:.4f}, ok_step={ok_step:.4f}, "
                 f"criterion={reason}, observed={len(observed_scores)}"
             )
         else:
@@ -672,7 +674,18 @@ class CameraLoopRunner:
         sequence_id: str,
         state: StateSpec,
     ) -> tuple[float | None, float, float | None]:
-        history = list(self._failed_loop_score_history.get(sequence_id, {}).get(state.name, ()))
+        histories = self._failed_loop_score_history.setdefault(sequence_id, {})
+        history_deque = histories.get(state.name)
+        if history_deque is None or not history_deque:
+            persisted = self.stats.failed_loop_score_history(sequence_id, state.name)
+            if persisted:
+                history_deque = deque(
+                    persisted[-state.decision_history_window:],
+                    maxlen=max(1, state.decision_history_window),
+                )
+                histories[state.name] = history_deque
+
+        history = list(history_deque or ())
         if not history:
             return None, 0.0, None
 
@@ -1158,6 +1171,7 @@ class CameraLoopRunner:
             history = deque(existing[-maxlen:], maxlen=maxlen)
             histories[state_name] = history
         history.append(score)
+        self.stats.set_failed_loop_score_history(sequence_id, state_name, list(history))
 
     def _promote_loop_decision_scores(self, sequence_id: str) -> None:
         current = self._current_loop_decision_scores.get(sequence_id, {})

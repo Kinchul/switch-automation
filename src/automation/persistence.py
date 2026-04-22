@@ -25,9 +25,13 @@ class _StatsRecord:
     status: str = "stopped"
     last_outcome: str | None = None
     updated_at: str | None = None
+    failed_loop_score_history: dict[str, list[float]] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> _StatsRecord:
+        failed_history_raw = data.get("failed_loop_score_history", {})
+        if not isinstance(failed_history_raw, dict):
+            failed_history_raw = {}
         return cls(
             loop_counter=int(data.get("loop_counter", 0)),
             total_elapsed_seconds=float(data.get("total_elapsed_seconds", 0.0)),
@@ -38,6 +42,11 @@ class _StatsRecord:
             status=str(data.get("status", "stopped")),
             last_outcome=data.get("last_outcome"),  # type: ignore[arg-type]
             updated_at=data.get("updated_at"),  # type: ignore[arg-type]
+            failed_loop_score_history={
+                str(state_name): [float(score) for score in state_scores if score is not None]
+                for state_name, state_scores in failed_history_raw.items()
+                if isinstance(state_scores, list)
+            },
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -49,6 +58,7 @@ class _StatsRecord:
             "status": self.status,
             "last_outcome": self.last_outcome,
             "updated_at": self.updated_at,
+            "failed_loop_score_history": self.failed_loop_score_history,
         }
 
     def snapshot(self) -> LoopStatsSnapshot:
@@ -205,6 +215,23 @@ class PersistentLoopStatsStore:
 
     def reset(self) -> None:
         self.sequences = {}
+        self.save()
+
+    def failed_loop_score_history(self, sequence_id: str, state_name: str) -> list[float]:
+        record = self.sequences.get(sequence_id)
+        if record is None:
+            return []
+        return list(record.failed_loop_score_history.get(state_name, ()))
+
+    def set_failed_loop_score_history(
+        self,
+        sequence_id: str,
+        state_name: str,
+        scores: list[float],
+    ) -> None:
+        record = self._record(sequence_id)
+        record.failed_loop_score_history[state_name] = [float(score) for score in scores]
+        record.updated_at = _utcnow().isoformat()
         self.save()
 
     def _record(self, sequence_id: str) -> _StatsRecord:
