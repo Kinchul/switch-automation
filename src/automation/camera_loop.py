@@ -196,6 +196,7 @@ class CameraLoopRunner:
             command = pending_command or self._wait_for_command()
             pending_command = None
             if command == "stop":
+                self._disconnect_controller("Stop requested while idle.")
                 continue
             if command == "pair":
                 self._pair_controller()
@@ -212,6 +213,7 @@ class CameraLoopRunner:
             try:
                 self.connect()
             except StopRequested:
+                self._disconnect_controller("Stop requested while connecting. Controller disconnected.")
                 print("Stop requested while connecting the controller. Automation is now idle.")
                 continue
             except RestartRequested:
@@ -243,6 +245,7 @@ class CameraLoopRunner:
                 )
             except StopRequested:
                 snapshot = self.stats.finish_loop(runtime.sequence_id, "stopped", status="stopped")
+                self._disconnect_controller("Stop requested. Controller disconnected.")
                 self._print_timers(runtime.sequence_id, snapshot)
                 print("Stop requested. Automation is now idle.")
                 continue
@@ -270,6 +273,7 @@ class CameraLoopRunner:
 
             self._checkpoint_stats(force=True)
             snapshot = self.stats.finish_loop(runtime.sequence_id, outcome.status, status="stopped")
+            self._disconnect_controller("Loop finished. Controller disconnected.")
             self._print_timers(runtime.sequence_id, snapshot)
             print(f"Outcome: {outcome.status} - {outcome.detail}")
 
@@ -1210,9 +1214,10 @@ class CameraLoopRunner:
 
     def _pair_controller(self) -> None:
         if self._controller_connected:
+            self._disconnect_controller("Pair requested while already connected. Controller disconnected.")
             self._mark_current_status("stopped")
-            self._set_preview_state("stopped", "Controller already connected. Waiting for restart.", [])
-            print("Controller is already connected. Waiting for restart.")
+            self._set_preview_state("stopped", "Controller disconnected. Waiting for restart.", [])
+            print("Controller was already connected and is now disconnected. Waiting for restart.")
             return
 
         restore_reconnect = None
@@ -1224,15 +1229,18 @@ class CameraLoopRunner:
             self.connect()
         except StopRequested:
             self._mark_current_status("stopped", last_outcome="pair_cancelled")
+            self._disconnect_controller("Pairing cancelled. Controller disconnected.")
             print("Pairing cancelled. Automation is now idle.")
             return
         except RestartRequested:
             self._mark_current_status("stopped", last_outcome="pair_cancelled")
+            self._disconnect_controller("Pairing interrupted by restart. Controller disconnected.")
             self.control.set_command("restart")
             print("Pairing interrupted by restart request. Starting a fresh loop next.")
             return
         except ResetRequested:
             self._mark_current_status("stopped", last_outcome="pair_cancelled")
+            self._disconnect_controller("Pairing interrupted by reset. Controller disconnected.")
             self.control.set_command("reset")
             print("Pairing interrupted by reset request. Forcing a game reset next.")
             return
@@ -1241,8 +1249,9 @@ class CameraLoopRunner:
                 self.controller.set_reconnect(restore_reconnect)
 
         self._mark_current_status("stopped")
-        self._set_preview_state("stopped", "Controller connected. Waiting for restart.", [])
-        print("Controller connected in pairing mode. Future restarts will reuse the connection.")
+        self._disconnect_controller("Pairing completed. Controller disconnected.")
+        self._set_preview_state("stopped", "Controller paired and disconnected. Waiting for restart.", [])
+        print("Controller paired successfully and disconnected. Future restarts will reconnect as needed.")
 
     def preview_overlay_lines(self) -> list[str]:
         sequence_id = self._current_sequence_id or self._ensure_selected_sequence()
@@ -1292,6 +1301,22 @@ class CameraLoopRunner:
         if self._current_sequence_id is None:
             self._current_sequence_id = self._ensure_selected_sequence()
         self.stats.mark_status(self._current_sequence_id, status, last_outcome=last_outcome)
+
+    def _disconnect_controller(self, detail: str | None = None) -> None:
+        if not self._controller_connected:
+            return
+        try:
+            self.controller.release_all()
+        except Exception:
+            pass
+        try:
+            self.controller.close()
+        except Exception as exc:
+            print(f"Controller disconnect warning: {exc}")
+        finally:
+            self._controller_connected = False
+        if detail:
+            print(detail)
 
     def _set_preview_state(
         self,
