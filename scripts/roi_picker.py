@@ -77,24 +77,46 @@ class RoiPicker:
 
         self.root = tk.Tk()
         self.root.title(f"ROI Picker - {image_path.name}")
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        viewport_margin = 120
+        self.viewport_size = (
+            min(self.display_size[0], max(200, screen_width - viewport_margin)),
+            min(self.display_size[1], max(200, screen_height - viewport_margin)),
+        )
 
         self.status_var = tk.StringVar(
             value=(
                 f"Image: {source.width}x{source.height}  Display: {self.display_size[0]}x{self.display_size[1]}  "
-                "Drag to select an ROI."
+                "Drag to select an ROI. Use the mouse wheel or scrollbars to move around."
             )
         )
         self.roi_var = tk.StringVar(value="ROI: not selected")
 
         self.photo = tk.PhotoImage(file=self._temp_file.name)
+        canvas_frame = tk.Frame(self.root)
+        canvas_frame.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+
         self.canvas = tk.Canvas(
-            self.root,
-            width=self.display_size[0],
-            height=self.display_size[1],
+            canvas_frame,
+            width=self.viewport_size[0],
+            height=self.viewport_size[1],
             highlightthickness=0,
         )
+        h_scroll = tk.Scrollbar(canvas_frame, orient="horizontal", command=self.canvas.xview)
+        v_scroll = tk.Scrollbar(canvas_frame, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(
+            xscrollcommand=h_scroll.set,
+            yscrollcommand=v_scroll.set,
+            scrollregion=(0, 0, self.display_size[0], self.display_size[1]),
+        )
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        v_scroll.grid(row=0, column=1, sticky="ns")
+        h_scroll.grid(row=1, column=0, sticky="ew")
+        canvas_frame.grid_rowconfigure(0, weight=1)
+        canvas_frame.grid_columnconfigure(0, weight=1)
+
         self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
-        self.canvas.pack()
 
         info = tk.Frame(self.root)
         info.pack(fill="x", padx=8, pady=8)
@@ -110,6 +132,8 @@ class RoiPicker:
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
+        self.canvas.bind("<MouseWheel>", self.on_mousewheel)
+        self.canvas.bind("<Shift-MouseWheel>", self.on_shift_mousewheel)
 
         self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
 
@@ -130,14 +154,16 @@ class RoiPicker:
         self.roi_var.set("ROI: not selected")
 
     def on_press(self, event) -> None:
-        self._drag_start = (self._clamp_x(event.x), self._clamp_y(event.y))
+        canvas_x = self._canvas_x(event.x)
+        canvas_y = self._canvas_y(event.y)
+        self._drag_start = (canvas_x, canvas_y)
         if self._rect_id is not None:
             self.canvas.delete(self._rect_id)
         self._rect_id = self.canvas.create_rectangle(
-            event.x,
-            event.y,
-            event.x,
-            event.y,
+            canvas_x,
+            canvas_y,
+            canvas_x,
+            canvas_y,
             outline="#00ff66",
             width=2,
         )
@@ -146,8 +172,8 @@ class RoiPicker:
         if self._drag_start is None or self._rect_id is None:
             return
         x0, y0 = self._drag_start
-        x1 = self._clamp_x(event.x)
-        y1 = self._clamp_y(event.y)
+        x1 = self._canvas_x(event.x)
+        y1 = self._canvas_y(event.y)
         self.canvas.coords(self._rect_id, x0, y0, x1, y1)
         roi = self._display_roi_to_source(x0, y0, x1, y1)
         self.roi_var.set(f"ROI: {roi.to_dict()}")
@@ -156,14 +182,21 @@ class RoiPicker:
         if self._drag_start is None:
             return
         x0, y0 = self._drag_start
-        x1 = self._clamp_x(event.x)
-        y1 = self._clamp_y(event.y)
+        x1 = self._canvas_x(event.x)
+        y1 = self._canvas_y(event.y)
         roi = self._display_roi_to_source(x0, y0, x1, y1)
         if roi.width <= 0 or roi.height <= 0:
             self.clear_selection()
             return
         self.roi_var.set(f"ROI: {roi.to_dict()}")
         self._print_output(roi)
+        self._drag_start = None
+
+    def on_mousewheel(self, event) -> None:
+        self.canvas.yview_scroll(self._wheel_units(event.delta), "units")
+
+    def on_shift_mousewheel(self, event) -> None:
+        self.canvas.xview_scroll(self._wheel_units(event.delta), "units")
 
     def _print_output(self, roi: Roi) -> None:
         if self.output_format in {"roi", "both"}:
@@ -202,6 +235,19 @@ class RoiPicker:
 
     def _clamp_y(self, value: int) -> int:
         return min(max(0, value), self.display_size[1] - 1)
+
+    def _canvas_x(self, value: int) -> int:
+        return self._clamp_x(int(round(self.canvas.canvasx(value))))
+
+    def _canvas_y(self, value: int) -> int:
+        return self._clamp_y(int(round(self.canvas.canvasy(value))))
+
+    @staticmethod
+    def _wheel_units(delta: int) -> int:
+        if delta == 0:
+            return 0
+        step = max(1, abs(delta) // 120)
+        return -step if delta > 0 else step
 
 
 def build_parser() -> argparse.ArgumentParser:
