@@ -102,9 +102,10 @@ class RestartRequested(Exception):
 
 
 class ResetRequested(Exception):
-    def __init__(self, *, timers_printed: bool = False) -> None:
+    def __init__(self, *, timers_printed: bool = False, reset_sent: bool = False) -> None:
         super().__init__()
         self.timers_printed = timers_printed
+        self.reset_sent = reset_sent
 
 
 class CameraLoopRunner:
@@ -140,7 +141,6 @@ class CameraLoopRunner:
         self._previous_loop_decision_scores: dict[str, dict[str, float]] = {}
         self._failed_loop_score_history: dict[str, dict[str, deque[float]]] = {}
         self._current_sequence_success_rate = 0.0
-        self._display_loop_counter_override: int | None = None
         self._target_detect_score_history: dict[str, deque[tuple[float, float]]] = {}
 
     def initialize(self) -> LoopStatsSnapshot:
@@ -195,9 +195,12 @@ class CameraLoopRunner:
     def run_service(self, attempts: int = 0) -> LoopOutcome:
         print("Service is ready. Current status: stopped.")
         pending_command: str | None = None
+        pending_reset_sent = False
         while True:
             command = pending_command or self._wait_for_command()
             pending_command = None
+            reset_already_sent = pending_reset_sent if command == "reset" else False
+            pending_reset_sent = False
             if command == "stop":
                 self._disconnect_controller("Stop requested while idle.")
                 continue
@@ -233,14 +236,15 @@ class CameraLoopRunner:
             self._current_loop_decision_scores[runtime.sequence_id] = {}
             if command == "restart":
                 self._previous_loop_decision_scores[runtime.sequence_id] = {}
-            stats = self.stats.start_new_loop(runtime.sequence_id)
+            if command == "reset" and reset_already_sent:
+                stats = self.stats.snapshot(runtime.sequence_id)
+            else:
+                stats = self.stats.start_new_loop(runtime.sequence_id)
             self._last_checkpoint_monotonic = time.monotonic()
             skip_startup_recovery = False
             if command == "reset":
-                try:
+                if not reset_already_sent:
                     self._force_game_reset()
-                finally:
-                    self._display_loop_counter_override = None
                 skip_startup_recovery = True
 
             try:
@@ -266,15 +270,22 @@ class CameraLoopRunner:
                 pending_command = "restart"
                 continue
             except ResetRequested as exc:
-                snapshot = self.stats.finish_loop(
-                    runtime.sequence_id,
-                    "reset_requested",
-                    status="stopped",
-                )
+                if exc.reset_sent:
+                    snapshot = self.stats.snapshot(runtime.sequence_id)
+                else:
+                    snapshot = self.stats.finish_loop(
+                        runtime.sequence_id,
+                        "reset_requested",
+                        status="stopped",
+                    )
                 if not exc.timers_printed:
                     self._print_timers(runtime.sequence_id, snapshot)
-                print("Reset requested. Forcing a game reset and starting a fresh loop.")
+                if exc.reset_sent:
+                    print("Reset requested. Game reset already sent; starting a fresh loop.")
+                else:
+                    print("Reset requested. Forcing a game reset and starting a fresh loop.")
                 pending_command = "reset"
+                pending_reset_sent = exc.reset_sent
                 continue
 
             self._checkpoint_stats(force=True)
@@ -371,17 +382,17 @@ class CameraLoopRunner:
 
         if state.reset_loop:
             frame = self.capture.get_frame()
-            saved = self._save_target_failed_roi(frame, runtime.sequence_id, state, entry_match)
             pre_snapshot = self.stats.snapshot(runtime.sequence_id)
             self._promote_loop_decision_scores(runtime.sequence_id)
-            self._display_loop_counter_override = pre_snapshot.loop_counter
             snapshot = self.stats.record_retry(runtime.sequence_id)
+            self._print_timers(runtime.sequence_id, pre_snapshot)
+            self._force_game_reset()
+            saved = self._save_target_failed_roi(frame, runtime.sequence_id, state, entry_match)
             print(
                 f'State "{state.name}" reset loop — loop {snapshot.loop_counter}.'
                 + (f" Saved ROI to {saved}." if saved else "")
             )
-            self._print_timers(runtime.sequence_id, pre_snapshot)
-            raise ResetRequested(timers_printed=True)
+            raise ResetRequested(timers_printed=True, reset_sent=True)
 
         if state.decision_mode == "loop_baseline_step":
             return self._run_loop_baseline_step(runtime, state)
@@ -1289,7 +1300,7 @@ class CameraLoopRunner:
             f"loop  : {_format_duration(snapshot.loop_elapsed_seconds)}",
             f"count : {count}",
             f"recov.: {self._timeout_reset_count}",
-            f"prob. : {success_prob:.2%}",
+            f"prob. : {success_prob:.3%}",
         ]
 
     def preview_overlay_state(self) -> OverlayState:
@@ -1306,8 +1317,6 @@ class CameraLoopRunner:
         )
 
     def _display_loop_counter(self, snapshot: LoopStatsSnapshot) -> int:
-        if self._display_loop_counter_override is not None:
-            return self._display_loop_counter_override
         return snapshot.loop_counter
 
     def _success_probability(self, loop_count: int) -> float:
