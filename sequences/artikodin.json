@@ -43,7 +43,7 @@
         "search_step": 4
       },
       "next_states": ["press_start", "fight_started"],
-      "timeout_ms": 5000,
+      "timeout_ms": 3000,
       "action": {
         "buttons": ["A"]
       }
@@ -63,7 +63,7 @@
         "search_step": 4
       },
       "next_states": ["previously", "ready", "fight_started"],
-      "timeout_ms": 5000,
+      "timeout_ms": 6500,
       "action": {
         "buttons": ["A"]
       }
@@ -104,7 +104,7 @@
         "search_step": 4
       },
       "next_states": ["ready"],
-      "timeout_ms": 2000,
+      "timeout_ms": 2500,
       "action": {
         "buttons": ["B"]
       }
