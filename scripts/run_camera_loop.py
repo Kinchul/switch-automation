@@ -378,6 +378,10 @@ def main() -> int:
         return 0
     finally:
         try:
+            runner.shutdown()
+        except Exception:
+            pass
+        try:
             lock_handle.close()
         except Exception:
             pass

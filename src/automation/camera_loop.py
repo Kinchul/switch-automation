@@ -150,6 +150,20 @@ class CameraLoopRunner:
         self._current_sequence_id = sequence_id
         return self.stats.snapshot(sequence_id)
 
+    def shutdown(self, *, outcome: str = "service_exit") -> None:
+        if self._current_sequence_id is not None:
+            try:
+                snapshot = self.stats.finish_loop(
+                    self._current_sequence_id,
+                    outcome,
+                    status="stopped",
+                )
+                self._print_timers(self._current_sequence_id, snapshot)
+            except Exception as exc:
+                print(f"Shutdown stats warning: {exc}")
+        self._set_preview_state("stopped", "Service is shutting down.", [])
+        self._disconnect_controller("Service shutdown. Controller disconnected.")
+
     def connect(self) -> bool:
         if self._controller_connected:
             return False
@@ -1496,10 +1510,8 @@ class CameraLoopRunner:
     def _box_for_roi(self, label: str, roi: Roi, *, matched: bool) -> OverlayBox:
         if matched:
             outline = (64, 220, 120, 255)
-            fill = (64, 220, 120, 56)
         else:
             outline = (255, 215, 0, 255)
-            fill = (255, 215, 0, 48)
         return OverlayBox(
             x=roi.x,
             y=roi.y,
@@ -1507,7 +1519,7 @@ class CameraLoopRunner:
             height=roi.height,
             label=label,
             outline=outline,
-            fill=fill,
+            fill=None,
         )
 
     def _detector_name(self, detector) -> str:
