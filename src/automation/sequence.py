@@ -129,6 +129,7 @@ class SequenceDefaults:
 class SequenceDefinition:
     sequence_id: str
     name: str | None
+    success_rate: float
     recovery: RecoverySpec
     defaults: SequenceDefaults
     initial_state: str
@@ -171,6 +172,9 @@ def load_sequence(path: Path) -> SequenceDefinition:
 
     sequence_id = path.stem
     name = str(data["name"]) if "name" in data and data["name"] not in (None, "") else None
+    success_rate = _as_float(data.get("success_rate", 0.0), "success_rate")
+    if success_rate < 0.0 or success_rate > 1.0:
+        raise SequenceConfigError(f"Sequence {path} success_rate must be between 0 and 1.")
     defaults = _parse_defaults(data.get("defaults"))
 
     recovery_raw = data.get("recovery") or {}
@@ -195,6 +199,7 @@ def load_sequence(path: Path) -> SequenceDefinition:
     definition = SequenceDefinition(
         sequence_id=sequence_id,
         name=name,
+        success_rate=success_rate,
         recovery=recovery,
         defaults=defaults,
         initial_state=initial_state,

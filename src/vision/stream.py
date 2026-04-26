@@ -118,6 +118,9 @@ class OverlayBox:
 @dataclass(slots=True)
 class OverlayState:
     lines: list[str] = field(default_factory=list)
+    top_left_lines: list[str] = field(default_factory=list)
+    bottom_left_lines: list[str] = field(default_factory=list)
+    top_right_lines: list[str] = field(default_factory=list)
     boxes: list[OverlayBox] = field(default_factory=list)
     bottom_right_lines: list[str] = field(default_factory=list)
 
@@ -207,7 +210,14 @@ class MjpegPreviewServer:
 
 
 def _draw_overlay(frame, overlay: OverlayState):
-    if not overlay.lines and not overlay.boxes and not overlay.bottom_right_lines:
+    if (
+        not overlay.lines
+        and not overlay.top_left_lines
+        and not overlay.bottom_left_lines
+        and not overlay.top_right_lines
+        and not overlay.boxes
+        and not overlay.bottom_right_lines
+    ):
         return frame
 
     from PIL import Image, ImageDraw, ImageFont
@@ -223,27 +233,44 @@ def _draw_overlay(frame, overlay: OverlayState):
         _draw_boxes(draw, overlay.boxes, font=small_font, frame_width=frame.shape[1], frame_height=frame.shape[0])
 
     if overlay.lines:
-        padding_x = max(14, font_size // 2)
-        padding_y = max(10, font_size // 3)
-        line_gap = max(6, font_size // 5)
-
-        line_boxes = [draw.textbbox((0, 0), line, font=font) for line in overlay.lines]
-        text_width = max((box[2] - box[0]) for box in line_boxes)
-        text_height = sum((box[3] - box[1]) for box in line_boxes) + line_gap * (len(overlay.lines) - 1)
-
-        box_bottom = frame.shape[0] - 12
-        box = (
-            12,
-            box_bottom - text_height - padding_y * 2,
-            12 + text_width + padding_x * 2,
-            box_bottom,
+        _draw_corner_lines(
+            draw,
+            overlay.lines,
+            font=font,
+            frame_width=frame.shape[1],
+            frame_height=frame.shape[0],
+            anchor="bottom_left",
         )
-        draw.rounded_rectangle(box, radius=10, fill=(0, 0, 0, 160), outline=(255, 255, 255, 64))
 
-        y = box[1] + padding_y
-        for line, bbox in zip(overlay.lines, line_boxes, strict=False):
-            draw.text((box[0] + padding_x, y), line, font=font, fill=(255, 255, 255, 255))
-            y += (bbox[3] - bbox[1]) + line_gap
+    if overlay.top_left_lines:
+        _draw_corner_lines(
+            draw,
+            overlay.top_left_lines,
+            font=font,
+            frame_width=frame.shape[1],
+            frame_height=frame.shape[0],
+            anchor="top_left",
+        )
+
+    if overlay.bottom_left_lines:
+        _draw_corner_lines(
+            draw,
+            overlay.bottom_left_lines,
+            font=font,
+            frame_width=frame.shape[1],
+            frame_height=frame.shape[0],
+            anchor="bottom_left",
+        )
+
+    if overlay.top_right_lines:
+        _draw_corner_lines(
+            draw,
+            overlay.top_right_lines,
+            font=font,
+            frame_width=frame.shape[1],
+            frame_height=frame.shape[0],
+            anchor="top_right",
+        )
 
     if overlay.bottom_right_lines:
         _draw_corner_lines(
@@ -259,6 +286,9 @@ def _draw_overlay(frame, overlay: OverlayState):
 
 
 def _draw_corner_lines(draw, lines: list[str], *, font, frame_width: int, frame_height: int, anchor: str) -> None:
+    if not lines:
+        return
+
     font_size = getattr(font, "size", 24)
     padding_x = max(14, font_size // 2)
     padding_y = max(10, font_size // 3)
@@ -276,6 +306,20 @@ def _draw_corner_lines(draw, lines: list[str], *, font, frame_width: int, frame_
             max(12, frame_height - box_height - 12),
             frame_width - 12,
             frame_height - 12,
+        )
+    elif anchor == "bottom_left":
+        box = (
+            12,
+            max(12, frame_height - box_height - 12),
+            12 + box_width,
+            frame_height - 12,
+        )
+    elif anchor == "top_right":
+        box = (
+            max(12, frame_width - box_width - 12),
+            12,
+            frame_width - 12,
+            12 + box_height,
         )
     else:
         box = (12, 12, 12 + box_width, 12 + box_height)

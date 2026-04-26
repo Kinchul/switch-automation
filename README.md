@@ -90,6 +90,7 @@ Sequence id:
 
 Top-level fields:
 
+- `success_rate`: number. Per-loop success probability used for the overlay's cumulative success probability.
 - `recovery`: object. States the runner can detect during timeout recovery.
 - `defaults`: object. Shared values applied to every state unless the state overrides them.
 - `states`: object. Ordered state map. The first state is the normal start state.

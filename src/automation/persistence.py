@@ -26,12 +26,16 @@ class _StatsRecord:
     last_outcome: str | None = None
     updated_at: str | None = None
     failed_loop_score_history: dict[str, list[float]] = field(default_factory=dict)
+    target_detect_score_history: list[dict[str, float]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> _StatsRecord:
         failed_history_raw = data.get("failed_loop_score_history", {})
         if not isinstance(failed_history_raw, dict):
             failed_history_raw = {}
+        target_history_raw = data.get("target_detect_score_history", [])
+        if not isinstance(target_history_raw, list):
+            target_history_raw = []
         return cls(
             loop_counter=int(data.get("loop_counter", 0)),
             total_elapsed_seconds=float(data.get("total_elapsed_seconds", 0.0)),
@@ -47,6 +51,7 @@ class _StatsRecord:
                 for state_name, state_scores in failed_history_raw.items()
                 if isinstance(state_scores, list)
             },
+            target_detect_score_history=_parse_target_detect_score_history(target_history_raw),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -59,6 +64,7 @@ class _StatsRecord:
             "last_outcome": self.last_outcome,
             "updated_at": self.updated_at,
             "failed_loop_score_history": self.failed_loop_score_history,
+            "target_detect_score_history": self.target_detect_score_history,
         }
 
     def snapshot(self) -> LoopStatsSnapshot:
@@ -223,6 +229,29 @@ class PersistentLoopStatsStore:
             return []
         return list(record.failed_loop_score_history.get(state_name, ()))
 
+    def target_detect_score_history(self, sequence_id: str) -> list[tuple[float, float]]:
+        record = self.sequences.get(sequence_id)
+        if record is None:
+            return []
+        return [
+            (float(entry["score"]), float(entry["threshold"]))
+            for entry in record.target_detect_score_history
+            if "score" in entry and "threshold" in entry
+        ]
+
+    def set_target_detect_score_history(
+        self,
+        sequence_id: str,
+        scores: list[tuple[float, float]],
+    ) -> None:
+        record = self._record(sequence_id)
+        record.target_detect_score_history = [
+            {"score": float(score), "threshold": float(threshold)}
+            for score, threshold in scores[-10:]
+        ]
+        record.updated_at = _utcnow().isoformat()
+        self.save()
+
     def set_failed_loop_score_history(
         self,
         sequence_id: str,
@@ -291,6 +320,26 @@ class PersistentLoopControl:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _parse_target_detect_score_history(raw_history: list[object]) -> list[dict[str, float]]:
+    history: list[dict[str, float]] = []
+    for raw_entry in raw_history:
+        score: object
+        threshold: object
+        if isinstance(raw_entry, dict):
+            score = raw_entry.get("score")
+            threshold = raw_entry.get("threshold")
+        elif isinstance(raw_entry, (list, tuple)) and len(raw_entry) >= 2:
+            score = raw_entry[0]
+            threshold = raw_entry[1]
+        else:
+            continue
+        try:
+            history.append({"score": float(score), "threshold": float(threshold)})
+        except (TypeError, ValueError):
+            continue
+    return history[-10:]
 
 
 def _load_json_object(path: Path, *, label: str) -> dict[str, object] | None:

@@ -139,6 +139,9 @@ class CameraLoopRunner:
         self._current_loop_decision_scores: dict[str, dict[str, float]] = {}
         self._previous_loop_decision_scores: dict[str, dict[str, float]] = {}
         self._failed_loop_score_history: dict[str, dict[str, deque[float]]] = {}
+        self._current_sequence_success_rate = 0.0
+        self._display_loop_counter_override: int | None = None
+        self._target_detect_score_history: dict[str, deque[tuple[float, float]]] = {}
 
     def initialize(self) -> LoopStatsSnapshot:
         self.control.set_command("noop")
@@ -190,7 +193,7 @@ class CameraLoopRunner:
         return True
 
     def run_service(self, attempts: int = 0) -> LoopOutcome:
-        print("Service is ready. Current mode: stopped.")
+        print("Service is ready. Current status: stopped.")
         pending_command: str | None = None
         while True:
             command = pending_command or self._wait_for_command()
@@ -234,7 +237,10 @@ class CameraLoopRunner:
             self._last_checkpoint_monotonic = time.monotonic()
             skip_startup_recovery = False
             if command == "reset":
-                self._force_game_reset()
+                try:
+                    self._force_game_reset()
+                finally:
+                    self._display_loop_counter_override = None
                 skip_startup_recovery = True
 
             try:
@@ -368,6 +374,7 @@ class CameraLoopRunner:
             saved = self._save_target_failed_roi(frame, runtime.sequence_id, state, entry_match)
             pre_snapshot = self.stats.snapshot(runtime.sequence_id)
             self._promote_loop_decision_scores(runtime.sequence_id)
+            self._display_loop_counter_override = pre_snapshot.loop_counter
             snapshot = self.stats.record_retry(runtime.sequence_id)
             print(
                 f'State "{state.name}" reset loop — loop {snapshot.loop_counter}.'
@@ -644,6 +651,11 @@ class CameraLoopRunner:
             )
 
         decision_match.decision_reason = reason
+        self._record_target_detect_score(
+            runtime.sequence_id,
+            score=loop_score,
+            threshold=_effective_threshold(decision_match) or threshold,
+        )
 
         if winner_name == next_state_name:
             self._remember_failed_loop_score(runtime.sequence_id, state.name, loop_score, state.decision_history_window)
@@ -1254,18 +1266,30 @@ class CameraLoopRunner:
         print("Controller paired successfully and disconnected. Future restarts will reconnect as needed.")
 
     def preview_overlay_lines(self) -> list[str]:
+        return self._bottom_left_overlay_lines()
+
+    def _top_left_overlay_lines(self) -> list[str]:
         sequence_id = self._current_sequence_id or self._ensure_selected_sequence()
         snapshot = self.stats.snapshot(sequence_id)
         with self._preview_lock:
             step = self._preview_step
         return [
             f"sequence: {sequence_id}",
-            f"mode: {snapshot.status}",
-            f"total: {_format_duration(snapshot.total_elapsed_seconds)}",
-            f"loop: {_format_duration(snapshot.loop_elapsed_seconds)}",
-            f"count: {snapshot.loop_counter}",
-            f"timeouts: {self._timeout_reset_count}",
-            f"step: {step}",
+            f"status  : {snapshot.status}",
+            f"step    : {step}",
+        ]
+
+    def _bottom_left_overlay_lines(self) -> list[str]:
+        sequence_id = self._current_sequence_id or self._ensure_selected_sequence()
+        snapshot = self.stats.snapshot(sequence_id)
+        count = self._display_loop_counter(snapshot)
+        success_prob = self._success_probability(count)
+        return [
+            f"total : {_format_duration(snapshot.total_elapsed_seconds)}",
+            f"loop  : {_format_duration(snapshot.loop_elapsed_seconds)}",
+            f"count : {count}",
+            f"recov.: {self._timeout_reset_count}",
+            f"prob. : {success_prob:.2%}",
         ]
 
     def preview_overlay_state(self) -> OverlayState:
@@ -1274,10 +1298,65 @@ class CameraLoopRunner:
             boxes = list(self._preview_boxes)
             button_lines = self._preview_button_lines(now)
         return OverlayState(
-            lines=self.preview_overlay_lines(),
+            top_left_lines=self._top_left_overlay_lines(),
+            bottom_left_lines=self._bottom_left_overlay_lines(),
+            top_right_lines=self._target_detect_overlay_lines(),
             boxes=boxes,
             bottom_right_lines=button_lines,
         )
+
+    def _display_loop_counter(self, snapshot: LoopStatsSnapshot) -> int:
+        if self._display_loop_counter_override is not None:
+            return self._display_loop_counter_override
+        return snapshot.loop_counter
+
+    def _success_probability(self, loop_count: int) -> float:
+        success_rate = max(0.0, min(1.0, self._current_sequence_success_rate))
+        attempts = max(0, loop_count)
+        return 1.0 - ((1.0 - success_rate) ** attempts)
+
+    def _record_target_detect_score(self, sequence_id: str, *, score: float, threshold: float) -> None:
+        history = self._target_detect_score_history.get(sequence_id)
+        if history is None:
+            history = deque(maxlen=10)
+            self._target_detect_score_history[sequence_id] = history
+        history.append((score, threshold))
+        self.stats.set_target_detect_score_history(sequence_id, list(history))
+
+    def _target_detect_overlay_lines(self) -> list[str]:
+        sequence_id = self._current_sequence_id or self._ensure_selected_sequence()
+        history = self._target_detect_score_history.get(sequence_id)
+        if not history:
+            return []
+        return [f"{score:.4f}/{threshold:.4f}" for score, threshold in history]
+
+    def _seed_target_detect_score_history(self, definition) -> None:
+        sequence_id = definition.sequence_id
+        if self._target_detect_score_history.get(sequence_id):
+            return
+
+        persisted = self.stats.target_detect_score_history(sequence_id)
+        if persisted:
+            self._target_detect_score_history[sequence_id] = deque(persisted[-10:], maxlen=10)
+            return
+
+        failed_scores = self.stats.failed_loop_score_history(sequence_id, "target_detect")
+        if not failed_scores:
+            return
+        threshold = self._target_detect_static_threshold(definition)
+        self._target_detect_score_history[sequence_id] = deque(
+            [(score, threshold) for score in failed_scores[-10:]],
+            maxlen=10,
+        )
+
+    def _target_detect_static_threshold(self, definition) -> float:
+        target_detect = definition.states.get("target_detect")
+        if target_detect is None or not target_detect.next_states:
+            return 0.0
+        target_state = definition.states.get(target_detect.next_states[0])
+        if target_state is None or target_state.scene is None:
+            return 0.0
+        return target_state.scene.threshold
 
     def _abort_if_control_requested(self) -> None:
         command = self._consume_pending_command()
@@ -1440,7 +1519,7 @@ class CameraLoopRunner:
             detail,
             "",
             f"sequence: {sequence_id}",
-            f"mode: {snapshot.status}",
+            f"status: {snapshot.status}",
             f"total: {_format_duration(snapshot.total_elapsed_seconds)}",
             f"loop: {_format_duration(snapshot.loop_elapsed_seconds)}",
             f"count: {snapshot.loop_counter}",
@@ -1555,6 +1634,8 @@ class CameraLoopRunner:
 
         definition = definitions[selected_sequence]
         self._current_sequence_id = selected_sequence
+        self._current_sequence_success_rate = definition.success_rate
+        self._seed_target_detect_score_history(definition)
         try:
             return build_runtime(definition)
         except SequenceConfigError as exc:
@@ -1570,10 +1651,16 @@ class CameraLoopRunner:
 
         selected_sequence = self.control.selected_sequence
         if selected_sequence in definitions:
+            definition = definitions[selected_sequence]
+            self._current_sequence_success_rate = definition.success_rate
+            self._seed_target_detect_score_history(definition)
             return selected_sequence
 
         selected_sequence = self.config.default_sequence or next(iter(definitions))
         self.control.set_selected_sequence(selected_sequence)
+        definition = definitions[selected_sequence]
+        self._current_sequence_success_rate = definition.success_rate
+        self._seed_target_detect_score_history(definition)
         return selected_sequence
 
     def _print_timers(self, sequence_id: str, stats: LoopStatsSnapshot) -> None:

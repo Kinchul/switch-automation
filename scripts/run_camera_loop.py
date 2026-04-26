@@ -356,7 +356,7 @@ def main() -> int:
         stats = runner.initialize()
         control = PersistentLoopControl.load(args.control_file)
         print(
-            "Started in stopped mode: "
+            "Started in stopped state: "
             f"selected_sequence={control.selected_sequence} "
             f"total={_format_duration(stats.total_elapsed_seconds)} "
             f"loop={_format_duration(stats.loop_elapsed_seconds)} "
