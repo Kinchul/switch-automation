@@ -1,0 +1,183 @@
+{
+  "success_rate": 0.0001220703125,
+  "recovery": {
+    "states": [
+      "fight_started",
+      "ready",
+      "continue",
+      "previously",
+      "press_start"
+    ],
+    "timeout_ms": 12000
+  },
+  "defaults": {
+    "timeout_ms": 7000,
+    "scene": {
+      "search_margin": 24,
+      "stride": 4,
+      "search_step": 4,
+      "hold_ms": 0,
+      "score_window": 3,
+      "luma_weight": 0.7,
+      "chroma_weight": 0.3
+    },
+    "action": {
+      "frequency_hz": 1.0,
+      "down_ms": 50,
+      "up_ms": 150
+    }
+  },
+  "states": {
+    "game_launch": {
+      "scene": {
+        "image_path": "../images/electhor/0_game_launch.png",
+        "roi": {
+          "x": 620,
+          "y": 400,
+          "width": 638,
+          "height": 286
+        },
+        "threshold": 0.08,
+        "search_margin": 18,
+        "stride": 6,
+        "search_step": 4
+      },
+      "next_states": ["press_start", "fight_started"],
+      "timeout_ms": 3000,
+      "action": {
+        "buttons": ["A"]
+      }
+    },
+    "press_start": {
+      "scene": {
+        "image_path": "../images/electhor/1_press_start.png",
+        "roi": {
+          "x": 809,
+          "y": 904,
+          "width": 377,
+          "height": 42
+        },
+        "threshold": 0.08,
+        "search_margin": 18,
+        "stride": 6,
+        "search_step": 4
+      },
+      "next_states": ["previously", "ready", "fight_started"],
+      "timeout_ms": 6500,
+      "action": {
+        "buttons": ["A"]
+      }
+    },
+    "continue": {
+      "scene": {
+        "image_path": "../images/electhor/2_select_save.png",
+        "roi": {
+          "x": 499,
+          "y": 234,
+          "width": 241,
+          "height": 54
+        },
+        "threshold": 0.08,
+        "search_margin": 8,
+        "stride": 2,
+        "search_step": 4
+      },
+      "next_states": ["previously"],
+      "timeout_ms": 2000,
+      "action": {
+        "buttons": ["A"],
+        "frequency_hz": 0
+      }
+    },
+    "previously": {
+      "scene": {
+        "image_path": "../images/electhor/3_previously.png",
+        "roi": {
+          "x": 409,
+          "y": 204,
+          "width": 293,
+          "height": 53
+        },
+        "threshold": 0.08,
+        "stride": 2,
+        "search_margin": 12,
+        "search_step": 4
+      },
+      "next_states": ["ready"],
+      "timeout_ms": 2500,
+      "action": {
+        "buttons": ["B"]
+      }
+    },
+    "ready": {
+      "scene": {
+        "image_path": "../images/electhor/4_ready.png",
+        "roi": {
+          "x": 868,
+          "y": 419,
+          "width": 129,
+          "height": 182
+        },
+        "threshold": 0.08,
+        "search_margin": 12,
+        "stride": 4,
+        "search_step": 4
+      },
+      "next_states": ["fight_started"],
+      "timeout_ms": 9000,
+      "action": {
+        "buttons": ["A"]
+      }
+    },
+    "fight_started": {
+      "scene": {
+        "image_path": "../images/electhor/5_target_failed.png",
+        "roi": {
+          "x": 473,
+          "y": 278,
+          "width": 169,
+          "height": 41
+        },
+        "threshold": 0.1,
+        "search_margin": 12,
+        "stride": 4,
+        "search_step": 4
+      },
+      "next_states": ["target_detect"],
+      "timeout_ms": 3000
+    },
+    "target_detect": {
+      "next_states": ["target_failed"],
+      "timeout_ms": 3000,
+      "timeout_next_state": "target_ok",
+      "decision_mode": "loop_baseline_step",
+      "decision_history_window": 11,
+      "decision_trend_window": 5,
+      "decision_ok_step": 0.005
+    },
+    "target_failed": {
+      "scene": {
+        "image_path": "../images/electhor/5_target_failed.png",
+        "roi": {
+          "x": 1051,
+          "y": 206,
+          "width": 313,
+          "height": 278
+        },
+        "threshold": 0.02,
+        "search_margin": 4,
+        "stride": 2,
+        "search_step": 2,
+        "score_window": 3,
+        "luma_weight": 0.25,
+        "chroma_weight": 0.75
+      },
+      "next_states": ["game_launch"],
+      "reset_loop": true
+    },
+    "target_ok": {
+      "next_states": [],
+      "notification": "mail"
+    }
+  }
+}
