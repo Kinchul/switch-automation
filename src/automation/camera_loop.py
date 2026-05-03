@@ -11,7 +11,7 @@ from statistics import median
 from control import Button, ControllerBackend, ControllerConnectCancelled
 from vision import CameraCapture, MatchResult, Roi, encode_rgb_frame
 from vision.detector import StaticImageDetector
-from vision.stream import OverlayBox, OverlayState
+from vision.hud import OverlayBox, OverlayState
 
 from .persistence import LoopStatsSnapshot, PersistentLoopControl, PersistentLoopStatsStore
 from .sequence import (

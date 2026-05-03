@@ -137,6 +137,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preview feed frame rate while the service is running.",
     )
     parser.add_argument(
+        "--no-local-display",
+        dest="local_display",
+        action="store_false",
+        help="Disable rendering on the attached SPI panel (enabled by default).",
+    )
+    parser.set_defaults(local_display=True)
+    parser.add_argument(
+        "--local-display-fbdev",
+        type=str,
+        default="/dev/fb1",
+        help="Framebuffer device to render on (JT3.5TR is usually /dev/fb1).",
+    )
+    parser.add_argument(
+        "--local-display-fps",
+        type=float,
+        default=30.0,
+        help="Local panel refresh rate.",
+    )
+    parser.add_argument(
+        "--local-display-width",
+        type=int,
+        default=480,
+        help="Local panel width in pixels.",
+    )
+    parser.add_argument(
+        "--local-display-height",
+        type=int,
+        default=320,
+        help="Local panel height in pixels.",
+    )
+    parser.add_argument(
         "--notify-email-to",
         type=str,
         default=os.getenv("SWITCH_NOTIFY_EMAIL_TO"),
@@ -345,12 +376,13 @@ def main() -> int:
         config=build_config(args),
         notify_cb=notifier,
     )
-    preview = _start_preview_server(
+    pipeline, mjpeg = _start_output_pipeline(
         capture=capture,
-        port=args.feed_port,
-        fps=args.feed_fps,
+        args=args,
         overlay_state_fn=runner.preview_overlay_state,
     )
+    if args.local_display:
+        print(f"Local display configured on {args.local_display_fbdev}.")
 
     try:
         stats = runner.initialize()
@@ -363,9 +395,9 @@ def main() -> int:
             f"count={stats.loop_counter}"
         )
         print("Camera is active. Controller connection will happen only when pairing or a loop is requested.")
-        print(f"Preview feed: http://127.0.0.1:{preview.port}/stream.mjpg")
+        print(f"Preview feed: http://127.0.0.1:{mjpeg.port}/stream.mjpg")
         for address in _guess_ip_addresses():
-            print(f"Preview feed: http://{address}:{preview.port}/stream.mjpg")
+            print(f"Preview feed: http://{address}:{mjpeg.port}/stream.mjpg")
         print(
             "Use "
             "`./.venv/bin/python scripts/run_camera_loop.py --action pair`, "
@@ -390,7 +422,10 @@ def main() -> int:
         except Exception:
             pass
         controller.close()
-        preview.close()
+        try:
+            pipeline.close()
+        except Exception:
+            pass
         capture.close()
 
 
@@ -441,27 +476,48 @@ def _build_email_notifier(args: argparse.Namespace):
     return _notify
 
 
-def _start_preview_server(
+def _start_output_pipeline(
     *,
     capture,
-    port: int,
-    fps: float,
+    args,
     overlay_state_fn,
 ):
-    from vision.stream import MjpegPreviewServer
+    from vision import FramebufferSink, MjpegSink, OutputPipeline
+
+    mjpeg = _build_mjpeg_sink(args)
+    sinks = [mjpeg]
+    if args.local_display:
+        sinks.append(
+            FramebufferSink(
+                target_fps=args.local_display_fps,
+                fbdev=args.local_display_fbdev,
+                width=args.local_display_width,
+                height=args.local_display_height,
+            )
+        )
+    pipeline = OutputPipeline(
+        capture=capture,
+        sinks=sinks,
+        overlay_state_fn=overlay_state_fn,
+    ).start()
+    return pipeline, mjpeg
+
+
+def _build_mjpeg_sink(args):
+    from vision import MjpegSink
 
     replaced_holder = False
     while True:
+        sink = MjpegSink(
+            port=args.feed_port,
+            target_fps=args.feed_fps,
+        )
         try:
-            return MjpegPreviewServer(
-                capture=capture,
-                port=port,
-                fps=fps,
-                overlay_state_fn=overlay_state_fn,
-            ).start()
+            sink.start()
+            return sink
         except OSError as exc:
             if getattr(exc, "errno", None) == 98:
-                holder_pid = _pid_listening_on_port(port)
+                holder_pid = _pid_listening_on_port(args.feed_port)
                 if (
                     not replaced_holder
                     and holder_pid is not None
@@ -469,7 +525,7 @@ def _start_preview_server(
                     and _pid_matches_camera_service(holder_pid)
                 ):
                     replaced_holder = True
-                    print(f"Preview port {port} is held by stale run_camera_loop process (pid={holder_pid}). Replacing it...")
+                    print(f"Preview port {args.feed_port} is held by stale run_camera_loop process (pid={holder_pid}). Replacing it...")
                     _terminate_process(holder_pid)
                     time.sleep(0.2)
                     continue
@@ -482,7 +538,7 @@ def _start_preview_server(
                     else:
                         holder_detail = f" Holder pid={holder_pid}."
                 raise OSError(
-                    f"Preview port {port} is already in use. Refusing to fall back to another port."
+                    f"Preview port {args.feed_port} is already in use. Refusing to fall back to another port."
                     f"{holder_detail}"
                 ) from exc
             raise

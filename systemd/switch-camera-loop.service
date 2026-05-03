@@ -10,6 +10,12 @@ WorkingDirectory=/home/vkindschi/switch-automation
 Environment=PYTHONUNBUFFERED=1
 Environment=SWITCH_AUTOMATION_DIR=/home/vkindschi/switch-automation
 Environment="SWITCH_CAMERA_LOOP_ARGS=--width 1920 --height 1080 --fps 20"
+# Local display (JT3.5TR / SPI panel). The FramebufferSink in the code already
+# sets these when /dev/fb1 is present, but exporting them here documents the
+# expected runtime and lets you override via /etc/default/switch-camera-loop.
+Environment=SDL_VIDEODRIVER=fbcon
+Environment=SDL_FBDEV=/dev/fb1
+Environment=SDL_NOMOUSE=1
 EnvironmentFile=-/etc/default/switch-camera-loop
 ExecStart=/bin/bash -lc 'exec "$SWITCH_AUTOMATION_DIR/.venv/bin/python" "$SWITCH_AUTOMATION_DIR/scripts/run_camera_loop.py" $SWITCH_CAMERA_LOOP_ARGS'
 Restart=always

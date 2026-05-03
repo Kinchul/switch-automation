@@ -11,7 +11,28 @@ requires-python = ">=3.11"
 authors = [
   { name = "vkindschi" }
 ]
-dependencies = []
+dependencies = [
+  "numpy>=1.24",
+  "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+# Faster JPEG encoding for the MJPEG preview feed and frame snapshots.
+fast-jpeg = ["simplejpeg>=1.7"]
+# Local SDL/framebuffer display sink (e.g. JT3.5TR on /dev/fb1).
+local-display = ["pygame>=2.5"]
+# Bluetooth controller emulation. Installed from the vendored submodule.
+# Note: PEP 508 forbids relative `file://` URIs, so install nxbt explicitly:
+#   ./.venv/bin/pip install -e ./tools/nxbt
+controller = []
+# Convenience: everything pip can install. Note: picamera2 is NOT here — on
+# Raspberry Pi OS install it via `sudo apt install -y python3-picamera2` so it
+# binds to the system libcamera stack.
+pi = [
+  "switch-automation[fast-jpeg]",
+  "switch-automation[local-display]",
+  "switch-automation[controller]",
+]
 
 [project.scripts]
 switch-automation = "cli:main"
