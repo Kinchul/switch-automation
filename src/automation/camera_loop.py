@@ -1322,12 +1322,14 @@ class CameraLoopRunner:
         with self._preview_lock:
             boxes = list(self._preview_boxes)
             button_lines = self._preview_button_lines(now)
+        banner = "NO IMAGE" if getattr(self.capture, "source_name", None) == "black" else None
         return OverlayState(
             top_left_lines=self._top_left_overlay_lines(),
             bottom_left_lines=self._bottom_left_overlay_lines(),
             top_right_lines=self._target_detect_overlay_lines(),
             boxes=boxes,
             bottom_right_lines=button_lines,
+            banner=banner,
         )
 
     def _display_loop_counter(self, snapshot: LoopStatsSnapshot) -> int:

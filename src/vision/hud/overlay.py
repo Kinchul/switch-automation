@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import time
 from dataclasses import dataclass, field
 
 
@@ -22,6 +24,9 @@ class OverlayState:
     top_right_lines: list[str] = field(default_factory=list)
     boxes: list[OverlayBox] = field(default_factory=list)
     bottom_right_lines: list[str] = field(default_factory=list)
+    # Centred banner. When set, drawn over the frame with a slow sine wobble.
+    # Used e.g. for "NO IMAGE" when the camera fell back to the black source.
+    banner: str | None = None
 
 
 def draw_overlay(frame, overlay: OverlayState):
@@ -32,6 +37,7 @@ def draw_overlay(frame, overlay: OverlayState):
         and not overlay.top_right_lines
         and not overlay.boxes
         and not overlay.bottom_right_lines
+        and not overlay.banner
     ):
         return frame
 
@@ -48,6 +54,14 @@ def draw_overlay(frame, overlay: OverlayState):
     font_size = max(14, min(36, short_side // 30))
     font = _load_overlay_font(font_size)
     small_font = _load_overlay_font(max(12, font_size - 4))
+
+    if overlay.banner:
+        _draw_banner(
+            draw,
+            overlay.banner,
+            frame_width=frame.shape[1],
+            frame_height=frame.shape[0],
+        )
 
     if overlay.boxes:
         _draw_boxes(draw, overlay.boxes, font=small_font, frame_width=frame.shape[1], frame_height=frame.shape[0])
@@ -147,6 +161,39 @@ def _draw_boxes(draw, boxes: list[OverlayBox], *, font, frame_width: int, frame_
             outline=box.outline,
         )
         draw.text((label_left + 8, label_top + 4), box.label, font=font, fill=(255, 255, 255, 255))
+
+
+def _draw_banner(draw, text: str, *, frame_width: int, frame_height: int) -> None:
+    # Big — about 1/8 of the shorter side, clamped to a sane range.
+    short_side = min(frame_width, frame_height)
+    banner_size = max(28, min(120, short_side // 8))
+    font = _load_overlay_font(banner_size)
+
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
+    # Slow sine wobble — period ~3 s, amplitude ~3% of the shorter side.
+    t = time.monotonic()
+    amp = max(4, short_side // 32)
+    dx = int(math.sin(t * 2.0) * amp)
+    dy = int(math.cos(t * 1.3) * amp * 0.5)
+
+    cx = frame_width // 2 + dx
+    cy = frame_height // 2 + dy
+    text_x = cx - text_w // 2 - bbox[0]
+    text_y = cy - text_h // 2 - bbox[1]
+
+    pad_x = max(12, banner_size // 3)
+    pad_y = max(8, banner_size // 4)
+    rect = (
+        text_x + bbox[0] - pad_x,
+        text_y + bbox[1] - pad_y,
+        text_x + bbox[2] + pad_x,
+        text_y + bbox[3] + pad_y,
+    )
+    draw.rounded_rectangle(rect, radius=banner_size // 4, fill=(0, 0, 0, 200), outline=(220, 60, 60, 255), width=max(2, banner_size // 24))
+    draw.text((text_x, text_y), text, font=font, fill=(240, 80, 80, 255))
 
 
 def _load_overlay_font(size: int):
