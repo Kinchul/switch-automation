@@ -130,6 +130,11 @@ class MjpegSink(FrameSink):
     _interval: float = field(init=False, default=0.2, repr=False)
 
     def start(self) -> None:
+        if self._http_server is not None:
+            # Already started — the runner pre-binds the socket to resolve
+            # EADDRINUSE conflicts before handing the sink to the pipeline,
+            # so a second start() from OutputPipeline.start() must be a no-op.
+            return
         handler = type("PreviewHandler", (_PreviewRequestHandler,), {})
         handler.sink = self
         self._http_server = ThreadingHTTPServer((self.host, self.port), handler)
