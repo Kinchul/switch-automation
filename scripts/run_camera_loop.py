@@ -146,8 +146,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--local-display-fbdev",
         type=str,
-        default="/dev/fb1",
-        help="Framebuffer device to render on (JT3.5TR is usually /dev/fb1).",
+        default="/dev/fb0",
+        help="Framebuffer device to render on (the JT3.5TR panel takes the "
+        "first free fbN slot — /dev/fb0 when no HDMI display is attached, "
+        "/dev/fb1 when one is).",
     )
     parser.add_argument(
         "--local-display-fps",
