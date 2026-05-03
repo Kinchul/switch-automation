@@ -25,6 +25,7 @@ class FramebufferSink(FrameSink):
 
     name: str = "framebuffer"
     target_fps: float = 30.0
+    target_size: tuple[int, int] | None = (480, 320)
     fbdev: str = "/dev/fb0"
     # Logical render resolution. If the panel's actual geometry differs we
     # honour the panel and the configured width/height become irrelevant.
@@ -74,6 +75,7 @@ class FramebufferSink(FrameSink):
         self._mmap = buffer
         self.width = geometry.xres
         self.height = geometry.yres
+        self.target_size = (geometry.xres, geometry.yres)
         self._line_length = geometry.line_length
         self._bytes_per_pixel = geometry.bits_per_pixel // 8
         print(
@@ -86,8 +88,7 @@ class FramebufferSink(FrameSink):
         if self._mmap is None:
             return
         try:
-            scaled = self._fit_letterbox(frame, self.width, self.height)
-            payload = _rgb_to_rgb565_bytes(scaled, self._line_length)
+            payload = _rgb_to_rgb565_bytes(frame, self._line_length)
             self._mmap.seek(0)
             self._mmap.write(payload)
         except Exception as exc:
@@ -106,29 +107,6 @@ class FramebufferSink(FrameSink):
             except Exception:
                 pass
             self._fb = None
-
-    @staticmethod
-    def _fit_letterbox(frame, target_w: int, target_h: int):
-        """Scale-to-fit with letterboxing, preserving aspect ratio. Pure numpy."""
-        import numpy as np  # type: ignore
-
-        src_h, src_w = frame.shape[:2]
-        if (src_w, src_h) == (target_w, target_h):
-            return frame
-        scale = min(target_w / src_w, target_h / src_h)
-        new_w = max(1, int(src_w * scale))
-        new_h = max(1, int(src_h * scale))
-
-        x_idx = (np.arange(new_w) * src_w / new_w).astype(np.int32)
-        y_idx = (np.arange(new_h) * src_h / new_h).astype(np.int32)
-        resized = frame[y_idx[:, None], x_idx[None, :]]
-
-        canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
-        off_x = (target_w - new_w) // 2
-        off_y = (target_h - new_h) // 2
-        canvas[off_y : off_y + new_h, off_x : off_x + new_w] = resized
-        return canvas
-
 
 @dataclass(slots=True)
 class _FbGeometry:

@@ -40,9 +40,13 @@ def draw_overlay(frame, overlay: OverlayState):
 
     image = Image.fromarray(frame)
     draw = ImageDraw.Draw(image, "RGBA")
-    font_size = max(24, frame.shape[1] // 55)
+    # Scale on the shorter dimension so 480x320 panels and 1920x1080 captures
+    # both end up with a readable HUD without one swamping the other. Clamped
+    # to a usable range for both extremes.
+    short_side = min(frame.shape[0], frame.shape[1])
+    font_size = max(18, min(48, short_side // 18))
     font = _load_overlay_font(font_size)
-    small_font = _load_overlay_font(max(18, font_size - 4))
+    small_font = _load_overlay_font(max(14, font_size - 4))
 
     if overlay.boxes:
         _draw_boxes(draw, overlay.boxes, font=small_font, frame_width=frame.shape[1], frame_height=frame.shape[0])

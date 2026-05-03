@@ -66,7 +66,7 @@ class OutputPipeline:
             try:
                 frame = self.capture.get_frame()
                 overlay = self._current_overlay_state()
-                rendered = draw_overlay(frame, overlay)
+                rendered_per_size = self._render_per_size(frame, overlay)
                 self._last_error = None
             except Exception as exc:
                 message = f"Pipeline render error: {exc}"
@@ -77,6 +77,7 @@ class OutputPipeline:
                 continue
 
             for sink in self._started_sinks:
+                rendered = rendered_per_size[sink.target_size]
                 try:
                     sink.consume(rendered)
                 except Exception as exc:
@@ -87,7 +88,47 @@ class OutputPipeline:
             if delay > 0:
                 time.sleep(delay)
 
+    def _render_per_size(self, frame, overlay):
+        """Render the frame+overlay once per distinct ``sink.target_size``.
+
+        Sinks that share a target size share the same rendered ndarray.
+        ``None`` means "render at capture resolution".
+        """
+        sizes: set[tuple[int, int] | None] = {sink.target_size for sink in self._started_sinks}
+        if not sizes:
+            sizes = {None}
+        rendered: dict[tuple[int, int] | None, object] = {}
+        for size in sizes:
+            if size is None:
+                rendered[size] = draw_overlay(frame, overlay)
+            else:
+                resized = _fit_letterbox(frame, *size)
+                rendered[size] = draw_overlay(resized, overlay)
+        return rendered
+
     def _current_overlay_state(self) -> OverlayState:
         if self.overlay_state_fn is not None:
             return self.overlay_state_fn()
         return OverlayState()
+
+
+def _fit_letterbox(frame, target_w: int, target_h: int):
+    """Scale-to-fit with letterboxing, preserving aspect ratio. Pure numpy."""
+    import numpy as np  # type: ignore
+
+    src_h, src_w = frame.shape[:2]
+    if (src_w, src_h) == (target_w, target_h):
+        return frame
+    scale = min(target_w / src_w, target_h / src_h)
+    new_w = max(1, int(src_w * scale))
+    new_h = max(1, int(src_h * scale))
+
+    x_idx = (np.arange(new_w) * src_w / new_w).astype(np.int32)
+    y_idx = (np.arange(new_h) * src_h / new_h).astype(np.int32)
+    resized = frame[y_idx[:, None], x_idx[None, :]]
+
+    canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    off_x = (target_w - new_w) // 2
+    off_y = (target_h - new_h) // 2
+    canvas[off_y : off_y + new_h, off_x : off_x + new_w] = resized
+    return canvas
