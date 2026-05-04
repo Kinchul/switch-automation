@@ -113,6 +113,9 @@ class TouchUi:
             self._ripples = [r for r in self._ripples if r.started_monotonic >= cutoff]
             ripples = list(self._ripples)
 
+        rotation = self._display_state.rotation_quarter_turns
+        ripples = [self._rotate_ripple(r, rotation) for r in ripples]
+
         if mode == "display_off":
             # Independent of backlight availability: blackout for safety so
             # the panel goes dark even if GPIO control failed.
@@ -151,7 +154,30 @@ class TouchUi:
             state.bottom_right_lines = [toast] + list(state.bottom_right_lines)
         if ripples:
             state.ripples = ripples
+        if rotation == 2 and state.buttons:
+            state.buttons = [self._rotate_button(b) for b in state.buttons]
         return state
+
+    def _rotate_ripple(self, ripple: OverlayRipple, rotation: int) -> OverlayRipple:
+        if rotation % 4 != 2:
+            return ripple
+        return OverlayRipple(
+            x=self.config.panel_width - 1 - ripple.x,
+            y=self.config.panel_height - 1 - ripple.y,
+            started_monotonic=ripple.started_monotonic,
+        )
+
+    def _rotate_button(self, btn: OverlayButton) -> OverlayButton:
+        # Pre-flip button positions so sink rotation lands them where the user
+        # tapped (taps are calibrated against the visible frame).
+        return OverlayButton(
+            x=self.config.panel_width - btn.x - btn.width,
+            y=self.config.panel_height - btn.y - btn.height,
+            width=btn.width,
+            height=btn.height,
+            label=btn.label,
+            button_id=btn.button_id,
+        )
 
     def close(self) -> None:
         # Persist state on shutdown.
@@ -315,17 +341,17 @@ class TouchUi:
         self._display_state.rotation_quarter_turns = (
             self._display_state.rotation_quarter_turns + 2
         ) % 4
-        # Persist rotation into calibration so the touch reader maps to the
-        # new orientation immediately.
-        self._display_state.calibration = TouchCalibration(
-            **{
-                **self._display_state.calibration.to_json(),
-                "rotation_quarter_turns": self._display_state.rotation_quarter_turns,
-            }
+        self._display_state.calibration.rotation_quarter_turns = (
+            self._display_state.rotation_quarter_turns
         )
-        self.reader.set_calibration(self._display_state.calibration)
         _save_display_state(self.config.state_file, self._display_state)
-        self._set_toast_locked(f"rot: {self._display_state.rotation_quarter_turns * 90}°")
+        # The pixel rotation flips the panel — taps now arrive at flipped
+        # coordinates relative to what the user sees. Force re-calibration.
+        self._set_toast_locked(f"rot: {self._display_state.rotation_quarter_turns * 90}° — recalibrate")
+        self._mode = "calibrate"
+        self._calibration_step = 0
+        self._calibration_raws = []
+        self.reader.set_raw_listener(self._on_calibration_tap)
 
     # ---- calibration ---------------------------------------------------
 
@@ -351,65 +377,40 @@ class TouchUi:
                 self.reader.set_raw_listener(None)
 
     def _finalize_calibration_locked(self) -> None:
-        if len(self._calibration_raws) != 4:
+        if len(self._calibration_raws) != len(self._CALIBRATION_CORNERS):
             self._mode = "display"
             return
-        tl, tr, br, bl = self._calibration_raws
 
-        # Average corner raws to derive min/max for each axis. We assume the
-        # device is roughly axis-aligned (the panel rotation is software-only;
-        # the touch IC reports its native frame). Auto-detect swap/invert.
-        x_left = (tl[0] + bl[0]) / 2
-        x_right = (tr[0] + br[0]) / 2
-        y_top = (tl[1] + tr[1]) / 2
-        y_bottom = (bl[1] + br[1]) / 2
+        # Build the panel-space targets that match the on-screen prompts.
+        panel_targets: list[tuple[float, float]] = []
+        for _label, (fx, fy) in self._CALIBRATION_CORNERS:
+            panel_targets.append(
+                (fx * (self.config.panel_width - 1), fy * (self.config.panel_height - 1))
+            )
 
-        # Detect swap_xy: if X axis varies less between left/right than between
-        # top/bottom, the IC has X and Y swapped relative to our prompts.
-        x_axis_range = abs(x_right - x_left)
-        y_axis_range = abs(y_bottom - y_top)
-        swap_xy = x_axis_range < y_axis_range / 2 or y_axis_range < x_axis_range / 2 and (
-            abs((tl[1] + tr[1]) / 2 - (bl[1] + br[1]) / 2) < abs((tl[0] + bl[0]) / 2 - (tr[0] + br[0]) / 2)
-        )
+        try:
+            calibration = TouchCalibration.from_corners(
+                raw_corners=list(self._calibration_raws),
+                panel_targets=panel_targets,
+                panel_width=self.config.panel_width,
+                panel_height=self.config.panel_height,
+                rotation_quarter_turns=self._display_state.rotation_quarter_turns,
+            )
+        except ValueError as exc:
+            print(f"Calibration fit failed: {exc}", file=sys.stderr)
+            self._set_toast_locked("calibration failed")
+            self._mode = "display"
+            return
 
-        if swap_xy:
-            x_left = (tl[1] + bl[1]) / 2
-            x_right = (tr[1] + br[1]) / 2
-            y_top = (tl[0] + tr[0]) / 2
-            y_bottom = (bl[0] + br[0]) / 2
-
-        invert_x = x_left > x_right
-        invert_y = y_top > y_bottom
-
-        raw_x_min = int(min(x_left, x_right))
-        raw_x_max = int(max(x_left, x_right))
-        raw_y_min = int(min(y_top, y_bottom))
-        raw_y_max = int(max(y_top, y_bottom))
-
-        # Inset prompts were at 5%/95% of panel; expand the raw range so 0..1
-        # maps to the *full* panel.
-        x_span = (raw_x_max - raw_x_min) / 0.9
-        y_span = (raw_y_max - raw_y_min) / 0.9
-        raw_x_min = int(raw_x_min - x_span * 0.05)
-        raw_x_max = int(raw_x_max + x_span * 0.05)
-        raw_y_min = int(raw_y_min - y_span * 0.05)
-        raw_y_max = int(raw_y_max + y_span * 0.05)
-
-        self._display_state.calibration = TouchCalibration(
-            raw_x_min=raw_x_min,
-            raw_x_max=raw_x_max,
-            raw_y_min=raw_y_min,
-            raw_y_max=raw_y_max,
-            swap_xy=swap_xy,
-            invert_x=invert_x,
-            invert_y=invert_y,
-            panel_width=self.config.panel_width,
-            panel_height=self.config.panel_height,
-            rotation_quarter_turns=self._display_state.rotation_quarter_turns,
-        )
-        self.reader.set_calibration(self._display_state.calibration)
+        self._display_state.calibration = calibration
+        self.reader.set_calibration(calibration)
         _save_display_state(self.config.state_file, self._display_state)
         self._set_toast_locked("calibrated")
+        # Print the fit so the user can sanity-check from the journal.
+        print(
+            f"Touch calibration: a={calibration.a:.4f} b={calibration.b:.4f} c={calibration.c:.2f} "
+            f"d={calibration.d:.4f} e={calibration.e:.4f} f={calibration.f:.2f}"
+        )
         self._mode = "display"
 
     def _calibration_overlay(self) -> OverlayState:
@@ -599,15 +600,14 @@ def _load_display_state(path: Path) -> tuple[_DisplayState, bool]:
         return _DisplayState(), False
     rotation = int(data.get("rotation_quarter_turns", 0)) % 4
     calib_raw = data.get("calibration")
-    has_calibration = isinstance(calib_raw, dict) and bool(calib_raw)
-    calibration = TouchCalibration.from_json(calib_raw) if isinstance(calib_raw, dict) else TouchCalibration()
-    # Force calibration's rotation field to the persisted display rotation.
-    calibration = TouchCalibration(
-        **{
-            **calibration.to_json(),
-            "rotation_quarter_turns": rotation,
-        }
-    )
+    # Only treat the file as calibrated when the affine "a" key is present —
+    # legacy min/max calibrations are not migrated and need a fresh fit.
+    has_calibration = isinstance(calib_raw, dict) and "a" in calib_raw
+    if has_calibration:
+        calibration = TouchCalibration.from_json(calib_raw)
+    else:
+        calibration = TouchCalibration()
+    calibration.rotation_quarter_turns = rotation
     return _DisplayState(rotation_quarter_turns=rotation, calibration=calibration), has_calibration
 
 

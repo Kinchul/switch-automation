@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import time
@@ -8,6 +9,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+_DEBUG = os.getenv("SWITCH_TOUCH_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass(slots=True)
@@ -26,68 +30,54 @@ class TouchEvent:
 
 @dataclass(slots=True)
 class TouchCalibration:
-    """Maps raw ADS7846 ABS_X/ABS_Y to panel pixel coordinates.
+    """Maps raw ADS7846 ABS_X/ABS_Y directly to panel pixel coordinates via an
+    affine transform.
 
-    The transform happens in two steps:
-      1. Map raw → normalized (0..1) using min/max from a 4-corner calibration.
-      2. Apply axis swap / inversion / panel rotation to land in panel pixel
-         space (where the framebuffer actually puts pixels after software
-         rotation in FramebufferSink).
+        panel_x = a*rx + b*ry + c
+        panel_y = d*rx + e*ry + f
 
-    ``rotation_quarter_turns`` is the FramebufferSink rotation in 90° steps;
-    the touch reader uses it to compose the final coordinate so taps line up
-    with what the user sees.
+    Solved from the four corner taps captured during calibration. The affine
+    representation handles axis swap, inversion, *and* the framebuffer rotation
+    in a single step — the user taps the visible corners and we directly fit
+    the matrix.
+
+    The default values are an identity-ish guess that maps a typical ADS7846
+    range to a 480x320 panel without rotation. They are only used until the
+    user runs calibration, after which we always have a proper fit.
+
+    ``panel_width`` / ``panel_height`` are kept as bounds for clamping and so
+    the rotation cycler can rebuild a sensible default if calibration is
+    discarded. ``rotation_quarter_turns`` is informational — the affine
+    already encodes any orientation.
     """
 
-    raw_x_min: int = 200
-    raw_x_max: int = 3900
-    raw_y_min: int = 200
-    raw_y_max: int = 3900
-    swap_xy: bool = False
-    invert_x: bool = False
-    invert_y: bool = False
+    a: float = 480.0 / 3700.0
+    b: float = 0.0
+    c: float = -480.0 * 200.0 / 3700.0
+    d: float = 0.0
+    e: float = 320.0 / 3700.0
+    f: float = -320.0 * 200.0 / 3700.0
     panel_width: int = 480
     panel_height: int = 320
     rotation_quarter_turns: int = 0
 
     def map(self, raw_x: int, raw_y: int) -> tuple[int, int]:
-        nx = _clamp01((raw_x - self.raw_x_min) / max(1, self.raw_x_max - self.raw_x_min))
-        ny = _clamp01((raw_y - self.raw_y_min) / max(1, self.raw_y_max - self.raw_y_min))
-        if self.invert_x:
-            nx = 1.0 - nx
-        if self.invert_y:
-            ny = 1.0 - ny
-        if self.swap_xy:
-            nx, ny = ny, nx
-
-        # nx/ny are in the panel's *unrotated* coordinate frame (the raw fbtft
-        # frame, 480x320 here). Apply the same rotation the sink applies to
-        # pixels so taps at the visible (0,0) map to (0,0) regardless.
-        rot = self.rotation_quarter_turns % 4
-        if rot == 0:
-            px, py = nx, ny
-            w, h = self.panel_width, self.panel_height
-        elif rot == 1:  # 90° clockwise
-            px, py = 1.0 - ny, nx
-            w, h = self.panel_height, self.panel_width
-        elif rot == 2:
-            px, py = 1.0 - nx, 1.0 - ny
-            w, h = self.panel_width, self.panel_height
-        else:  # 270°
-            px, py = ny, 1.0 - nx
-            w, h = self.panel_height, self.panel_width
-
-        return int(px * (w - 1)), int(py * (h - 1))
+        px = self.a * raw_x + self.b * raw_y + self.c
+        py = self.d * raw_x + self.e * raw_y + self.f
+        # Clamp to panel bounds so out-of-range raws don't draw off-screen
+        # ripples or trigger wrong-corner button hits.
+        px_i = max(0, min(self.panel_width - 1, int(round(px))))
+        py_i = max(0, min(self.panel_height - 1, int(round(py))))
+        return px_i, py_i
 
     def to_json(self) -> dict[str, Any]:
         return {
-            "raw_x_min": self.raw_x_min,
-            "raw_x_max": self.raw_x_max,
-            "raw_y_min": self.raw_y_min,
-            "raw_y_max": self.raw_y_max,
-            "swap_xy": self.swap_xy,
-            "invert_x": self.invert_x,
-            "invert_y": self.invert_y,
+            "a": self.a,
+            "b": self.b,
+            "c": self.c,
+            "d": self.d,
+            "e": self.e,
+            "f": self.f,
             "panel_width": self.panel_width,
             "panel_height": self.panel_height,
             "rotation_quarter_turns": self.rotation_quarter_turns,
@@ -95,18 +85,108 @@ class TouchCalibration:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> TouchCalibration:
+        # Accept new affine format. The legacy min/max/swap/invert format is
+        # not migrated — any saved file from before this change will fall back
+        # to defaults and the user will be prompted to recalibrate.
+        if "a" not in data:
+            return cls(
+                panel_width=int(data.get("panel_width", 480)),
+                panel_height=int(data.get("panel_height", 320)),
+                rotation_quarter_turns=int(data.get("rotation_quarter_turns", 0)),
+            )
         return cls(
-            raw_x_min=int(data.get("raw_x_min", 200)),
-            raw_x_max=int(data.get("raw_x_max", 3900)),
-            raw_y_min=int(data.get("raw_y_min", 200)),
-            raw_y_max=int(data.get("raw_y_max", 3900)),
-            swap_xy=bool(data.get("swap_xy", False)),
-            invert_x=bool(data.get("invert_x", False)),
-            invert_y=bool(data.get("invert_y", False)),
+            a=float(data.get("a", 0.0)),
+            b=float(data.get("b", 0.0)),
+            c=float(data.get("c", 0.0)),
+            d=float(data.get("d", 0.0)),
+            e=float(data.get("e", 0.0)),
+            f=float(data.get("f", 0.0)),
             panel_width=int(data.get("panel_width", 480)),
             panel_height=int(data.get("panel_height", 320)),
             rotation_quarter_turns=int(data.get("rotation_quarter_turns", 0)),
         )
+
+    @classmethod
+    def from_corners(
+        cls,
+        *,
+        raw_corners: list[tuple[int, int]],
+        panel_targets: list[tuple[float, float]],
+        panel_width: int,
+        panel_height: int,
+        rotation_quarter_turns: int = 0,
+    ) -> TouchCalibration:
+        """Fit an affine raw→panel map from N>=3 tapped corners.
+
+        ``raw_corners`` and ``panel_targets`` must be the same length and in
+        matching order. Solves two independent least-squares problems for X
+        and Y panel coordinates.
+        """
+        if len(raw_corners) != len(panel_targets) or len(raw_corners) < 3:
+            raise ValueError("Need at least 3 matching raw/panel pairs to fit.")
+
+        # 6-param affine = two independent linear regressions:
+        #   panel_x = a*rx + b*ry + c
+        #   panel_y = d*rx + e*ry + f
+        # Solve both via the normal equations on the same design matrix.
+        n = len(raw_corners)
+        sum_rx = sum(rx for rx, _ in raw_corners)
+        sum_ry = sum(ry for _, ry in raw_corners)
+        sum_rx2 = sum(rx * rx for rx, _ in raw_corners)
+        sum_ry2 = sum(ry * ry for _, ry in raw_corners)
+        sum_rxry = sum(rx * ry for rx, ry in raw_corners)
+
+        # Design matrix M^T M (3x3 symmetric). Columns of M are [rx, ry, 1].
+        m = [
+            [sum_rx2, sum_rxry, sum_rx],
+            [sum_rxry, sum_ry2, sum_ry],
+            [sum_rx, sum_ry, float(n)],
+        ]
+
+        def _solve(targets: list[float]) -> tuple[float, float, float]:
+            v = [
+                sum(rx * t for (rx, _), t in zip(raw_corners, targets, strict=True)),
+                sum(ry * t for (_, ry), t in zip(raw_corners, targets, strict=True)),
+                sum(targets),
+            ]
+            return _solve3(m, v)
+
+        targets_x = [tx for tx, _ in panel_targets]
+        targets_y = [ty for _, ty in panel_targets]
+        a, b, c = _solve(targets_x)
+        d, e, f = _solve(targets_y)
+        return cls(
+            a=a, b=b, c=c, d=d, e=e, f=f,
+            panel_width=panel_width,
+            panel_height=panel_height,
+            rotation_quarter_turns=rotation_quarter_turns,
+        )
+
+
+def _solve3(m: list[list[float]], v: list[float]) -> tuple[float, float, float]:
+    """Solve a 3x3 linear system m @ x = v via Cramer's rule. Stable enough for
+    the well-conditioned matrices produced by 4 corner taps spread over the
+    panel."""
+    def _det(rows: list[list[float]]) -> float:
+        a, b, c = rows[0]
+        d, e, f = rows[1]
+        g, h, i = rows[2]
+        return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+
+    det = _det(m)
+    if abs(det) < 1e-9:
+        raise ValueError("Calibration matrix is singular — corner taps are colinear?")
+
+    def _replace_col(col: int, vec: list[float]) -> list[list[float]]:
+        out = [row.copy() for row in m]
+        for i in range(3):
+            out[i][col] = vec[i]
+        return out
+
+    x0 = _det(_replace_col(0, v)) / det
+    x1 = _det(_replace_col(1, v)) / det
+    x2 = _det(_replace_col(2, v)) / det
+    return x0, x1, x2
 
 
 @dataclass
@@ -205,6 +285,20 @@ class TouchReader:
             self._thread = None
 
     def _run(self) -> None:
+        """Process evdev events frame-by-frame.
+
+        ADS7846 emits each touch sample as a sequence terminated by SYN_REPORT:
+            EV_ABS ABS_X v
+            EV_ABS ABS_Y v
+            [EV_ABS ABS_PRESSURE v]
+            [EV_KEY BTN_TOUCH 0|1]
+            EV_SYN SYN_REPORT 0
+
+        We accumulate the values for the current frame in ``frame_*`` and only
+        commit them at SYN_REPORT. That guarantees the press coordinates we
+        report belong to the *same* frame as the BTN_TOUCH=1 event, instead of
+        carrying over stale values from the previous tap.
+        """
         import evdev  # type: ignore
 
         ABS_X = evdev.ecodes.ABS_X
@@ -212,73 +306,91 @@ class TouchReader:
         ABS_PRESSURE = evdev.ecodes.ABS_PRESSURE
         BTN_TOUCH = evdev.ecodes.BTN_TOUCH
         SYN_REPORT = evdev.ecodes.SYN_REPORT
+        EV_ABS = evdev.ecodes.EV_ABS
+        EV_KEY = evdev.ecodes.EV_KEY
+        EV_SYN = evdev.ecodes.EV_SYN
 
-        raw_x = 0
-        raw_y = 0
-        pressure = 0
-        # Pressed = either BTN_TOUCH=1 or pressure>0 was seen since last release.
-        btn_pressed = False
-        pressure_pressed = False
+        # Per-frame staging.
+        frame_x: int | None = None
+        frame_y: int | None = None
+        frame_pressure: int | None = None
+        frame_btn_touch: int | None = None
+
+        # Tap-tracking state (committed at SYN_REPORT).
+        last_x = 0
+        last_y = 0
+        pressed = False
         press_started_at: float | None = None
         press_start_raw: tuple[int, int] | None = None
         max_drift = 0
-        last_event_at = time.monotonic()
-        # If neither BTN_TOUCH=0 nor pressure=0 arrives but events stop coming
-        # in, treat that idle period as a release.
-        idle_release_ms = 80
 
         while not self._stop.is_set() and self._device is not None:
             try:
                 for event in self._device.read_loop():
                     if self._stop.is_set():
                         return
-                    last_event_at = time.monotonic()
-                    if event.type == evdev.ecodes.EV_ABS:
+                    if event.type == EV_ABS:
                         if event.code == ABS_X:
-                            raw_x = event.value
+                            frame_x = event.value
                         elif event.code == ABS_Y:
-                            raw_y = event.value
+                            frame_y = event.value
                         elif event.code == ABS_PRESSURE:
-                            pressure = event.value
-                            new_pressed = pressure > 0
-                            if new_pressed and not pressure_pressed:
-                                pressure_pressed = True
-                                if not btn_pressed:
-                                    self._begin_press(raw_x, raw_y)
-                                    press_started_at = time.monotonic()
-                                    press_start_raw = (raw_x, raw_y)
-                                    max_drift = 0
-                            elif not new_pressed and pressure_pressed:
-                                pressure_pressed = False
-                                if not btn_pressed:
-                                    self._handle_release(
-                                        raw_x, raw_y, press_started_at, press_start_raw, max_drift
-                                    )
-                                    press_started_at = None
-                                    press_start_raw = None
-                                    max_drift = 0
-                    elif event.type == evdev.ecodes.EV_KEY and event.code == BTN_TOUCH:
-                        if event.value == 1 and not btn_pressed:
-                            btn_pressed = True
-                            if not pressure_pressed:
-                                self._begin_press(raw_x, raw_y)
-                                press_started_at = time.monotonic()
-                                press_start_raw = (raw_x, raw_y)
-                                max_drift = 0
-                        elif event.value == 0 and btn_pressed:
-                            btn_pressed = False
-                            if not pressure_pressed:
-                                self._handle_release(
-                                    raw_x, raw_y, press_started_at, press_start_raw, max_drift
-                                )
-                                press_started_at = None
-                                press_start_raw = None
-                                max_drift = 0
-                    elif event.type == SYN_REPORT:
-                        if (btn_pressed or pressure_pressed) and press_start_raw is not None:
-                            dx = abs(raw_x - press_start_raw[0])
-                            dy = abs(raw_y - press_start_raw[1])
+                            frame_pressure = event.value
+                    elif event.type == EV_KEY and event.code == BTN_TOUCH:
+                        frame_btn_touch = event.value
+                    elif event.type == EV_SYN and event.code == SYN_REPORT:
+                        # Commit the frame.
+                        if frame_x is not None:
+                            last_x = frame_x
+                        if frame_y is not None:
+                            last_y = frame_y
+
+                        # A frame indicates a press if BTN_TOUCH=1 or pressure>0.
+                        # It indicates release if BTN_TOUCH=0 or pressure=0.
+                        # If neither fires, the existing state is unchanged.
+                        is_pressed = pressed
+                        if frame_btn_touch == 1:
+                            is_pressed = True
+                        elif frame_btn_touch == 0:
+                            is_pressed = False
+                        if frame_pressure is not None:
+                            if frame_pressure > 0:
+                                is_pressed = True
+                            else:
+                                is_pressed = False
+
+                        if _DEBUG:
+                            print(
+                                f"touch frame: x={last_x} y={last_y} btn={frame_btn_touch} "
+                                f"p={frame_pressure} pressed={pressed}->{is_pressed}",
+                                file=sys.stderr,
+                            )
+
+                        if is_pressed and not pressed:
+                            press_started_at = time.monotonic()
+                            press_start_raw = (last_x, last_y)
+                            max_drift = 0
+                            self._begin_press(last_x, last_y)
+                        elif not is_pressed and pressed:
+                            self._handle_release(
+                                last_x, last_y, press_started_at, press_start_raw, max_drift
+                            )
+                            press_started_at = None
+                            press_start_raw = None
+                            max_drift = 0
+                        elif is_pressed and pressed and press_start_raw is not None:
+                            dx = abs(last_x - press_start_raw[0])
+                            dy = abs(last_y - press_start_raw[1])
                             max_drift = max(max_drift, dx + dy)
+                            self._notify_move(last_x, last_y)
+
+                        pressed = is_pressed
+                        # Reset per-frame stage; we keep last_x/last_y rolling
+                        # because some frames omit them.
+                        frame_x = None
+                        frame_y = None
+                        frame_pressure = None
+                        frame_btn_touch = None
             except OSError:
                 # Device closed.
                 return
@@ -286,15 +398,24 @@ class TouchReader:
                 print(f"Touch reader error: {exc}", file=sys.stderr)
                 time.sleep(0.5)
 
+    def _notify_move(self, raw_x: int, raw_y: int) -> None:
+        """No-op hook for future drag tracking; kept here so callers can subclass."""
+        return
+
     def _begin_press(self, raw_x: int, raw_y: int) -> None:
         if self.on_any_activity is not None:
             try:
                 self.on_any_activity()
             except Exception as exc:
                 print(f"on_any_activity error: {exc}", file=sys.stderr)
+        with self._calib_lock:
+            px, py = self._calibration.map(raw_x, raw_y)
+        if _DEBUG:
+            print(
+                f"touch press: raw=({raw_x},{raw_y}) panel=({px},{py})",
+                file=sys.stderr,
+            )
         if self.on_press is not None:
-            with self._calib_lock:
-                px, py = self._calibration.map(raw_x, raw_y)
             try:
                 self.on_press(px, py)
             except Exception as exc:
