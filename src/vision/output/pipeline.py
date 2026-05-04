@@ -77,7 +77,15 @@ class OutputPipeline:
                 continue
 
             for sink in self._started_sinks:
-                rendered = rendered_per_size[sink.target_size]
+                try:
+                    sink_overlay = sink.transform_overlay(overlay)
+                except Exception as exc:
+                    print(f"Sink '{sink.name}' overlay error: {exc}", file=sys.stderr)
+                    sink_overlay = None
+                if sink_overlay is None:
+                    rendered = rendered_per_size[sink.target_size]
+                else:
+                    rendered = self._render_for_sink(frame, sink.target_size, sink_overlay)
                 try:
                     sink.consume(rendered)
                 except Exception as exc:
@@ -105,6 +113,12 @@ class OutputPipeline:
                 resized = _fit_letterbox(frame, *size)
                 rendered[size] = draw_overlay(resized, overlay)
         return rendered
+
+    def _render_for_sink(self, frame, target_size, overlay):
+        if target_size is None:
+            return draw_overlay(frame, overlay)
+        resized = _fit_letterbox(frame, *target_size)
+        return draw_overlay(resized, overlay)
 
     def _current_overlay_state(self) -> OverlayState:
         if self.overlay_state_fn is not None:

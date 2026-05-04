@@ -17,6 +17,16 @@ class OverlayBox:
 
 
 @dataclass(slots=True)
+class OverlayButton:
+    x: int
+    y: int
+    width: int
+    height: int
+    label: str
+    button_id: str
+
+
+@dataclass(slots=True)
 class OverlayState:
     lines: list[str] = field(default_factory=list)
     top_left_lines: list[str] = field(default_factory=list)
@@ -27,6 +37,11 @@ class OverlayState:
     # Centred banner. When set, drawn over the frame with a slow sine wobble.
     # Used e.g. for "NO IMAGE" when the camera fell back to the black source.
     banner: str | None = None
+    buttons: list[OverlayButton] = field(default_factory=list)
+    # When True the frame is replaced with a black canvas before drawing — used
+    # for the "display off" state on the local panel without affecting the
+    # MJPEG stream.
+    blackout: bool = False
 
 
 def draw_overlay(frame, overlay: OverlayState):
@@ -38,11 +53,16 @@ def draw_overlay(frame, overlay: OverlayState):
         and not overlay.boxes
         and not overlay.bottom_right_lines
         and not overlay.banner
+        and not overlay.buttons
+        and not overlay.blackout
     ):
         return frame
 
     from PIL import Image, ImageDraw
     import numpy as np
+
+    if overlay.blackout:
+        frame = np.zeros_like(frame)
 
     image = Image.fromarray(frame)
     draw = ImageDraw.Draw(image, "RGBA")
@@ -65,6 +85,9 @@ def draw_overlay(frame, overlay: OverlayState):
 
     if overlay.boxes:
         _draw_boxes(draw, overlay.boxes, font=small_font, frame_width=frame.shape[1], frame_height=frame.shape[0])
+
+    if overlay.buttons:
+        _draw_buttons(draw, overlay.buttons, font=font, frame_width=frame.shape[1], frame_height=frame.shape[0])
 
     for lines, anchor in (
         (overlay.lines, "bottom_left"),
@@ -161,6 +184,27 @@ def _draw_boxes(draw, boxes: list[OverlayBox], *, font, frame_width: int, frame_
             outline=box.outline,
         )
         draw.text((label_left + 8, label_top + 4), box.label, font=font, fill=(255, 255, 255, 255))
+
+
+def _draw_buttons(draw, buttons: list[OverlayButton], *, font, frame_width: int, frame_height: int) -> None:
+    for btn in buttons:
+        left = max(0, min(frame_width - 1, btn.x))
+        top = max(0, min(frame_height - 1, btn.y))
+        right = max(left + 1, min(frame_width, btn.x + btn.width))
+        bottom = max(top + 1, min(frame_height, btn.y + btn.height))
+        draw.rounded_rectangle(
+            (left, top, right, bottom),
+            radius=10,
+            fill=(20, 30, 50, 220),
+            outline=(120, 200, 255, 255),
+            width=2,
+        )
+        bbox = draw.textbbox((0, 0), btn.label, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        cx = (left + right) // 2 - text_w // 2 - bbox[0]
+        cy = (top + bottom) // 2 - text_h // 2 - bbox[1]
+        draw.text((cx, cy), btn.label, font=font, fill=(255, 255, 255, 255))
 
 
 def _draw_banner(draw, text: str, *, frame_width: int, frame_height: int) -> None:

@@ -27,3 +27,13 @@ class FrameSink(ABC):
 
     def close(self) -> None:
         return
+
+    def transform_overlay(self, overlay):
+        """Optionally produce a sink-specific overlay state.
+
+        Returning ``None`` (the default) means "use the shared overlay". Sinks
+        that want their own — e.g. the framebuffer sink overlaying touch buttons
+        on the local panel without affecting the MJPEG stream — return a new
+        ``OverlayState`` instance here.
+        """
+        return None

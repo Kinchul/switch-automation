@@ -170,6 +170,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Local panel height in pixels.",
     )
     parser.add_argument(
+        "--touch-device",
+        type=str,
+        default="/dev/input/event4",
+        help="Evdev path for the resistive touch controller (ADS7846).",
+    )
+    parser.add_argument(
+        "--no-touch",
+        dest="touch",
+        action="store_false",
+        help="Disable the on-panel touch UI (enabled by default when --local-display).",
+    )
+    parser.set_defaults(touch=True)
+    parser.add_argument(
+        "--display-state-file",
+        type=Path,
+        default=ROOT / "debug" / "camera" / "display.json",
+        help="JSON file storing touch calibration and panel rotation.",
+    )
+    parser.add_argument(
+        "--backlight-chip",
+        type=str,
+        default="/dev/gpiochip0",
+        help="GPIO chip path holding the backlight FET line (libgpiod v2).",
+    )
+    parser.add_argument(
+        "--backlight-line",
+        type=int,
+        default=18,
+        help="GPIO line number for the panel backlight FET (high = on).",
+    )
+    parser.add_argument(
         "--notify-email-to",
         type=str,
         default=os.getenv("SWITCH_NOTIFY_EMAIL_TO"),
@@ -378,10 +409,12 @@ def main() -> int:
         config=build_config(args),
         notify_cb=notifier,
     )
+    touch_ui, touch_reader, backlight = _start_touch_ui(args)
     pipeline, mjpeg = _start_output_pipeline(
         capture=capture,
         args=args,
         overlay_state_fn=runner.preview_overlay_state,
+        touch_ui=touch_ui,
     )
     if args.local_display:
         print(f"Local display configured on {args.local_display_fbdev}.")
@@ -428,6 +461,21 @@ def main() -> int:
             pipeline.close()
         except Exception:
             pass
+        if touch_reader is not None:
+            try:
+                touch_reader.close()
+            except Exception:
+                pass
+        if touch_ui is not None:
+            try:
+                touch_ui.close()
+            except Exception:
+                pass
+        if backlight is not None:
+            try:
+                backlight.close()
+            except Exception:
+                pass
         capture.close()
 
 
@@ -483,8 +531,9 @@ def _start_output_pipeline(
     capture,
     args,
     overlay_state_fn,
+    touch_ui=None,
 ):
-    from vision import FramebufferSink, MjpegSink, OutputPipeline
+    from vision import FramebufferSink, OutputPipeline
 
     mjpeg = _build_mjpeg_sink(args)
     sinks = [mjpeg]
@@ -495,6 +544,10 @@ def _start_output_pipeline(
                 fbdev=args.local_display_fbdev,
                 width=args.local_display_width,
                 height=args.local_display_height,
+                overlay_transform=touch_ui.transform_overlay if touch_ui is not None else None,
+                rotation_provider=(
+                    (lambda: touch_ui.rotation_quarter_turns) if touch_ui is not None else None
+                ),
             )
         )
     pipeline = OutputPipeline(
@@ -503,6 +556,48 @@ def _start_output_pipeline(
         overlay_state_fn=overlay_state_fn,
     ).start()
     return pipeline, mjpeg
+
+
+def _start_touch_ui(args):
+    if not args.local_display or not args.touch:
+        return None, None, None
+
+    from vision import BacklightController, TouchReader, TouchUi, TouchUiConfig
+    from automation.persistence import PersistentLoopControl
+    from automation.sequence import load_sequences
+
+    backlight = BacklightController(chip=args.backlight_chip, line=args.backlight_line)
+    backlight.start()
+
+    reader = TouchReader(device_path=args.touch_device)
+    loop_control = PersistentLoopControl.load(args.control_file)
+
+    def _request_select_sequence(sequence_id: str) -> None:
+        loop_control.set_selected_sequence(sequence_id)
+        loop_control.set_command("restart")
+
+    def _list_sequences() -> list[str]:
+        try:
+            return sorted(load_sequences(args.sequences_dir).keys())
+        except Exception:
+            return []
+
+    ui_config = TouchUiConfig(
+        panel_width=args.local_display_width,
+        panel_height=args.local_display_height,
+        state_file=args.display_state_file,
+        sequences_dir=args.sequences_dir,
+    )
+    ui = TouchUi(
+        config=ui_config,
+        backlight=backlight,
+        reader=reader,
+        loop_control=loop_control,
+        request_select_sequence=_request_select_sequence,
+        list_sequences=_list_sequences,
+    )
+    reader.start()
+    return ui, reader, backlight
 
 
 def _build_mjpeg_sink(args):

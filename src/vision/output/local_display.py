@@ -4,7 +4,7 @@ import mmap
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from .base import FrameSink
 
@@ -31,6 +31,13 @@ class FramebufferSink(FrameSink):
     # honour the panel and the configured width/height become irrelevant.
     width: int = 480
     height: int = 320
+    # Optional sink-specific overlay transform. When set, OutputPipeline calls
+    # it instead of using the shared overlay.
+    overlay_transform: Callable[[Any], Any] | None = None
+    # Optional callable returning the current quarter-turn rotation count
+    # (0 = none, 2 = 180°). 90/270 are not supported because they would change
+    # the rendered (W, H) and therefore not fit the framebuffer.
+    rotation_provider: Callable[[], int] | None = None
     _fb: Any = field(init=False, default=None, repr=False)
     _mmap: Any = field(init=False, default=None, repr=False)
     _line_length: int = field(init=False, default=0, repr=False)
@@ -88,11 +95,22 @@ class FramebufferSink(FrameSink):
         if self._mmap is None:
             return
         try:
+            if self.rotation_provider is not None:
+                rotation = self.rotation_provider() % 4
+                if rotation == 2:
+                    frame = frame[::-1, ::-1].copy()
+                # 1 / 3 (90°/270°) intentionally unsupported — fall through
+                # rendering as-is.
             payload = _rgb_to_rgb565_bytes(frame, self._line_length)
             self._mmap.seek(0)
             self._mmap.write(payload)
         except Exception as exc:
             print(f"Local display render error: {exc}", file=sys.stderr)
+
+    def transform_overlay(self, overlay):
+        if self.overlay_transform is None:
+            return None
+        return self.overlay_transform(overlay)
 
     def close(self) -> None:
         if self._mmap is not None:
