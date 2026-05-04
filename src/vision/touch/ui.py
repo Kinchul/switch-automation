@@ -32,7 +32,12 @@ class TouchUiConfig:
 @dataclass(slots=True)
 class _DisplayState:
     rotation_quarter_turns: int = 0
+    auto_off_seconds: int = 600  # 0 = disabled
     calibration: TouchCalibration = field(default_factory=TouchCalibration)
+
+
+# Cycle of auto-off timeouts, in seconds. ``0`` means "disabled".
+_AUTO_OFF_LEVELS: tuple[int, ...] = (0, 300, 600, 1800)
 
 
 class TouchUi:
@@ -77,6 +82,13 @@ class TouchUi:
         self._calibration_raws: list[tuple[int, int]] = []
         self._seq_picker_offset = 0
         self._ripples: list[OverlayRipple] = []
+        # Auto-off bookkeeping. ``_last_activity_monotonic`` is bumped on every
+        # press; when no activity occurs for ``auto_off_seconds`` we sleep the
+        # panel. ``_wake_swallow_until`` makes the wake tap a pure wake — it
+        # doesn't also count as a UI tap.
+        now = time.monotonic()
+        self._last_activity_monotonic = now
+        self._wake_swallow_until_monotonic = 0.0
 
         self.reader.set_calibration(self._display_state.calibration)
         self.reader.on_tap = self._on_tap
@@ -107,6 +119,7 @@ class TouchUi:
         """
         now = time.monotonic()
         with self._lock:
+            self._maybe_auto_off_locked(now)
             mode = self._mode
             toast = self._current_toast_locked()
             cutoff = now - _RIPPLE_DURATION_S
@@ -197,6 +210,7 @@ class TouchUi:
     def _on_any_activity(self) -> None:
         """Wake-from-off — runs at press start, before tap is finalized."""
         with self._lock:
+            self._last_activity_monotonic = time.monotonic()
             if self._mode == "display_off":
                 self._wake_locked()
 
@@ -212,10 +226,16 @@ class TouchUi:
     def _on_tap(self, event) -> None:
         x, y = event.x, event.y
         with self._lock:
+            now = time.monotonic()
+            self._last_activity_monotonic = now
             if self._mode == "display_off":
                 # The wake already happened in _on_any_activity. Swallow this
                 # tap — don't let it count as a button press on the screen
                 # the user can't see yet.
+                return
+            if now < self._wake_swallow_until_monotonic:
+                # The wake-from-off tap mustn't also cycle the overlay or hit
+                # a button — eat it here.
                 return
             self._dispatch_tap_locked(x, y)
 
@@ -304,6 +324,9 @@ class TouchUi:
         if button_id == "disp_rotate":
             self._cycle_rotation_locked()
             return
+        if button_id == "disp_auto_off":
+            self._cycle_auto_off_locked()
+            return
 
         if button_id.startswith("seq_pick:"):
             sequence_id = button_id.split(":", 1)[1]
@@ -325,16 +348,47 @@ class TouchUi:
 
     # ---- sleep / wake --------------------------------------------------
 
+    def _maybe_auto_off_locked(self, now: float) -> None:
+        timeout = self._display_state.auto_off_seconds
+        if timeout <= 0:
+            return
+        if self._mode == "display_off":
+            return
+        # Don't sleep mid-calibration — the user may be lining up a tap.
+        if self._mode == "calibrate":
+            self._last_activity_monotonic = now
+            return
+        if now - self._last_activity_monotonic < timeout:
+            return
+        self._sleep_locked()
+
     def _sleep_locked(self) -> None:
-        self._previous_mode_before_off = "hud_only"
+        self._previous_mode_before_off = "none"
         self._mode = "display_off"
         self.backlight.set_on(False)
 
     def _wake_locked(self) -> None:
         self.backlight.set_on(True)
-        self._mode = self._previous_mode_before_off
+        # Wake into the no-HUD overlay. The tap that woke us must not also act
+        # as a cycle/UI tap — set a short "swallow" window so _on_tap ignores
+        # the imminent release event.
+        self._mode = "none"
+        self._wake_swallow_until_monotonic = time.monotonic() + 0.6
+        self._last_activity_monotonic = time.monotonic()
 
     # ---- rotation ------------------------------------------------------
+
+    def _cycle_auto_off_locked(self) -> None:
+        try:
+            idx = _AUTO_OFF_LEVELS.index(self._display_state.auto_off_seconds)
+        except ValueError:
+            idx = -1
+        next_seconds = _AUTO_OFF_LEVELS[(idx + 1) % len(_AUTO_OFF_LEVELS)]
+        self._display_state.auto_off_seconds = next_seconds
+        # Reset the activity counter so the user has the full new window.
+        self._last_activity_monotonic = time.monotonic()
+        _save_display_state(self.config.state_file, self._display_state)
+        self._set_toast_locked(f"auto-off {_format_auto_off(next_seconds)}")
 
     def _cycle_rotation_locked(self) -> None:
         # Step by 2 quarter-turns so the rotated render still matches the
@@ -485,12 +539,14 @@ class TouchUi:
                 ("Off", "disp_off"),
                 ("Calibrate", "disp_calibrate"),
                 ("Rotate", "disp_rotate"),
+                (f"Auto-off {_format_auto_off(self._display_state.auto_off_seconds)}", "disp_auto_off"),
                 ("Back", "back_home"),
             ],
-            cols=2,
+            cols=3,
             rows=2,
             top_inset_px=self.config.panel_height // 5,
             bottom_inset_px=self.config.panel_height // 5,
+            skip_blank_labels=True,
         )
 
     def _sequence_buttons(self) -> list[OverlayButton]:
@@ -604,6 +660,10 @@ def _load_display_state(path: Path) -> tuple[_DisplayState, bool]:
         print(f"TouchUi: could not load {path}: {exc}", file=sys.stderr)
         return _DisplayState(), False
     rotation = int(data.get("rotation_quarter_turns", 0)) % 4
+    auto_off = int(data.get("auto_off_seconds", 600))
+    if auto_off not in _AUTO_OFF_LEVELS:
+        # Snap to nearest level so the cycle button stays predictable.
+        auto_off = min(_AUTO_OFF_LEVELS, key=lambda v: abs(v - auto_off))
     calib_raw = data.get("calibration")
     # Only treat the file as calibrated when the affine "a" key is present —
     # legacy min/max calibrations are not migrated and need a fresh fit.
@@ -613,13 +673,29 @@ def _load_display_state(path: Path) -> tuple[_DisplayState, bool]:
     else:
         calibration = TouchCalibration()
     calibration.rotation_quarter_turns = rotation
-    return _DisplayState(rotation_quarter_turns=rotation, calibration=calibration), has_calibration
+    return (
+        _DisplayState(
+            rotation_quarter_turns=rotation,
+            auto_off_seconds=auto_off,
+            calibration=calibration,
+        ),
+        has_calibration,
+    )
 
 
 def _save_display_state(path: Path, state: _DisplayState) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "rotation_quarter_turns": state.rotation_quarter_turns,
+        "auto_off_seconds": state.auto_off_seconds,
         "calibration": state.calibration.to_json(),
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _format_auto_off(seconds: int) -> str:
+    if seconds <= 0:
+        return "off"
+    if seconds < 60:
+        return f"{seconds}s"
+    return f"{seconds // 60}m"
