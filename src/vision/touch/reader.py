@@ -129,8 +129,8 @@ class TouchReader:
     on_tap: Callable[[TouchEvent], None] | None = None
     on_raw_press: Callable[[int, int], None] | None = None
     on_any_activity: Callable[[], None] | None = None
-    min_press_ms: int = 30
-    drag_threshold_px: int = 20
+    min_press_ms: int = 10
+    drag_threshold_px: int = 30
 
     _calibration: TouchCalibration = field(default_factory=TouchCalibration)
     _calib_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -168,13 +168,26 @@ class TouchReader:
             return
         try:
             self._device = evdev.InputDevice(self.device_path)
+            try:
+                self._device.grab()
+            except Exception as exc:
+                # Non-fatal — grab failure just means another consumer can also
+                # see the events. Continue.
+                print(
+                    f"Touch reader: could not exclusive-grab {self.device_path}: {exc}",
+                    file=sys.stderr,
+                )
         except Exception as exc:
             print(
                 f"Touch input disabled: could not open {self.device_path}: {exc}",
                 file=sys.stderr,
             )
             return
-        print(f"Touch input active on {self.device_path} ({self._device.name}).")
+        capabilities = self._device.capabilities(verbose=False)
+        print(
+            f"Touch input active on {self.device_path} ({self._device.name}). "
+            f"caps={ {k: v for k, v in capabilities.items() if k in (1, 3)} }"
+        )
         self._thread = threading.Thread(target=self._run, name="touch-reader", daemon=True)
         self._thread.start()
 
@@ -195,56 +208,89 @@ class TouchReader:
 
         ABS_X = evdev.ecodes.ABS_X
         ABS_Y = evdev.ecodes.ABS_Y
+        ABS_PRESSURE = evdev.ecodes.ABS_PRESSURE
         BTN_TOUCH = evdev.ecodes.BTN_TOUCH
         SYN_REPORT = evdev.ecodes.SYN_REPORT
 
         raw_x = 0
         raw_y = 0
-        pressed = False
+        pressure = 0
+        # Pressed = either BTN_TOUCH=1 or pressure>0 was seen since last release.
+        btn_pressed = False
+        pressure_pressed = False
         press_started_at: float | None = None
         press_start_raw: tuple[int, int] | None = None
         max_drift = 0
+        last_event_at = time.monotonic()
+        # If neither BTN_TOUCH=0 nor pressure=0 arrives but events stop coming
+        # in, treat that idle period as a release.
+        idle_release_ms = 80
 
         while not self._stop.is_set() and self._device is not None:
             try:
-                events = self._device.read_loop()
-                for event in events:
+                for event in self._device.read_loop():
                     if self._stop.is_set():
                         return
+                    last_event_at = time.monotonic()
                     if event.type == evdev.ecodes.EV_ABS:
                         if event.code == ABS_X:
                             raw_x = event.value
                         elif event.code == ABS_Y:
                             raw_y = event.value
+                        elif event.code == ABS_PRESSURE:
+                            pressure = event.value
+                            new_pressed = pressure > 0
+                            if new_pressed and not pressure_pressed:
+                                pressure_pressed = True
+                                if not btn_pressed:
+                                    self._begin_press(raw_x, raw_y)
+                                    press_started_at = time.monotonic()
+                                    press_start_raw = (raw_x, raw_y)
+                                    max_drift = 0
+                            elif not new_pressed and pressure_pressed:
+                                pressure_pressed = False
+                                if not btn_pressed:
+                                    self._handle_release(
+                                        raw_x, raw_y, press_started_at, press_start_raw, max_drift
+                                    )
+                                    press_started_at = None
+                                    press_start_raw = None
+                                    max_drift = 0
                     elif event.type == evdev.ecodes.EV_KEY and event.code == BTN_TOUCH:
-                        if event.value == 1 and not pressed:
-                            pressed = True
-                            press_started_at = time.monotonic()
-                            press_start_raw = (raw_x, raw_y)
-                            max_drift = 0
-                            if self.on_any_activity is not None:
-                                try:
-                                    self.on_any_activity()
-                                except Exception as exc:
-                                    print(f"on_any_activity error: {exc}", file=sys.stderr)
-                        elif event.value == 0 and pressed:
-                            self._handle_release(
-                                raw_x, raw_y, press_started_at, press_start_raw, max_drift
-                            )
-                            pressed = False
-                            press_started_at = None
-                            press_start_raw = None
-                            max_drift = 0
-                    elif event.type == SYN_REPORT and pressed and press_start_raw is not None:
-                        dx = abs(raw_x - press_start_raw[0])
-                        dy = abs(raw_y - press_start_raw[1])
-                        max_drift = max(max_drift, dx + dy)
+                        if event.value == 1 and not btn_pressed:
+                            btn_pressed = True
+                            if not pressure_pressed:
+                                self._begin_press(raw_x, raw_y)
+                                press_started_at = time.monotonic()
+                                press_start_raw = (raw_x, raw_y)
+                                max_drift = 0
+                        elif event.value == 0 and btn_pressed:
+                            btn_pressed = False
+                            if not pressure_pressed:
+                                self._handle_release(
+                                    raw_x, raw_y, press_started_at, press_start_raw, max_drift
+                                )
+                                press_started_at = None
+                                press_start_raw = None
+                                max_drift = 0
+                    elif event.type == SYN_REPORT:
+                        if (btn_pressed or pressure_pressed) and press_start_raw is not None:
+                            dx = abs(raw_x - press_start_raw[0])
+                            dy = abs(raw_y - press_start_raw[1])
+                            max_drift = max(max_drift, dx + dy)
             except OSError:
                 # Device closed.
                 return
             except Exception as exc:
                 print(f"Touch reader error: {exc}", file=sys.stderr)
                 time.sleep(0.5)
+
+    def _begin_press(self, raw_x: int, raw_y: int) -> None:
+        if self.on_any_activity is not None:
+            try:
+                self.on_any_activity()
+            except Exception as exc:
+                print(f"on_any_activity error: {exc}", file=sys.stderr)
 
     def _handle_release(
         self,

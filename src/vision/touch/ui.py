@@ -70,8 +70,7 @@ class TouchUi:
         self.list_sequences = list_sequences
 
         self._lock = threading.RLock()
-        self._mode = config.initial_mode if config.initial_mode in _CYCLE_MODES + ("home",) else "hud_only"
-        self._display_state = _load_display_state(config.state_file)
+        self._display_state, has_calibration = _load_display_state(config.state_file)
         self._previous_mode_before_off: str = "hud_only"
         self._toast: tuple[str, float] | None = None
         self._calibration_step = 0
@@ -81,6 +80,20 @@ class TouchUi:
         self.reader.set_calibration(self._display_state.calibration)
         self.reader.on_tap = self._on_tap
         self.reader.on_any_activity = self._on_any_activity
+
+        # Force calibration on first run (no saved state file). The user can't
+        # interact reliably without it, so make this the very first overlay.
+        if not has_calibration:
+            self._mode = "calibrate"
+            self._calibration_step = 0
+            self._calibration_raws = []
+            self.reader.set_raw_listener(self._on_calibration_tap)
+        else:
+            self._mode = (
+                config.initial_mode
+                if config.initial_mode in _CYCLE_MODES + ("home",)
+                else "hud_only"
+            )
 
     # ---- public API ----------------------------------------------------
 
@@ -168,7 +181,10 @@ class TouchUi:
             self._advance_cycle_locked()
             return
         if mode == "home":
-            self._handle_button_tap_locked(self._home_buttons(), x, y)
+            # Home is part of the cycle: tapping outside any button advances
+            # the cycle back to "none". Buttons themselves capture their taps.
+            if not self._handle_button_tap_locked(self._home_buttons(), x, y):
+                self._mode = "hud_only"
             return
         if mode == "action":
             self._handle_button_tap_locked(self._action_buttons(), x, y)
@@ -194,12 +210,13 @@ class TouchUi:
 
     def _handle_button_tap_locked(
         self, buttons: Iterable[OverlayButton], x: int, y: int
-    ) -> None:
+    ) -> bool:
+        """Returns True if the tap hit a button."""
         for btn in buttons:
             if btn.x <= x < btn.x + btn.width and btn.y <= y < btn.y + btn.height:
                 self._on_button_locked(btn.button_id)
-                return
-        # No-op for taps outside any button in button overlays.
+                return True
+        return False
 
     def _on_button_locked(self, button_id: str) -> None:
         if button_id == "exit":
@@ -403,6 +420,8 @@ class TouchUi:
     # ---- button layouts ------------------------------------------------
 
     def _home_buttons(self) -> list[OverlayButton]:
+        # Sized to ~50% of the panel height so there's an obvious tap-outside
+        # zone above and below — tapping outside cycles back to hud_only.
         return _grid(
             self.config.panel_width,
             self.config.panel_height,
@@ -413,6 +432,8 @@ class TouchUi:
             ],
             cols=3,
             rows=1,
+            top_inset_px=self.config.panel_height // 4,
+            bottom_inset_px=self.config.panel_height // 4,
         )
 
     def _action_buttons(self) -> list[OverlayButton]:
@@ -508,10 +529,11 @@ def _grid(
     margin_px: int = 12,
     gap_px: int = 8,
     top_inset_px: int = 0,
+    bottom_inset_px: int = 0,
     skip_blank_labels: bool = False,
 ) -> list[OverlayButton]:
     inner_w = panel_w - 2 * margin_px
-    inner_h = panel_h - 2 * margin_px - top_inset_px
+    inner_h = panel_h - 2 * margin_px - top_inset_px - bottom_inset_px
     cell_w = (inner_w - gap_px * (cols - 1)) // cols
     cell_h = (inner_h - gap_px * (rows - 1)) // rows
 
@@ -542,16 +564,23 @@ def _pad_nav(nav: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return nav
 
 
-def _load_display_state(path: Path) -> _DisplayState:
+def _load_display_state(path: Path) -> tuple[_DisplayState, bool]:
+    """Load persisted display state.
+
+    Returns ``(state, has_calibration)``. ``has_calibration`` is False when no
+    file exists or the file lacks a calibration entry — used by callers to
+    force the calibration UI on first start.
+    """
     if not path.exists():
-        return _DisplayState()
+        return _DisplayState(), False
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         print(f"TouchUi: could not load {path}: {exc}", file=sys.stderr)
-        return _DisplayState()
+        return _DisplayState(), False
     rotation = int(data.get("rotation_quarter_turns", 0)) % 4
-    calib_raw = data.get("calibration") or {}
+    calib_raw = data.get("calibration")
+    has_calibration = isinstance(calib_raw, dict) and bool(calib_raw)
     calibration = TouchCalibration.from_json(calib_raw) if isinstance(calib_raw, dict) else TouchCalibration()
     # Force calibration's rotation field to the persisted display rotation.
     calibration = TouchCalibration(
@@ -560,7 +589,7 @@ def _load_display_state(path: Path) -> _DisplayState:
             "rotation_quarter_turns": rotation,
         }
     )
-    return _DisplayState(rotation_quarter_turns=rotation, calibration=calibration)
+    return _DisplayState(rotation_quarter_turns=rotation, calibration=calibration), has_calibration
 
 
 def _save_display_state(path: Path, state: _DisplayState) -> None:
