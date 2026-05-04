@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 from time import monotonic, sleep
 from typing import Any
 
 from .base import CameraSource, to_rgb_frame
+
+
+DEFAULT_V4L2_CONTROLS: dict[str, int] = {
+    "brightness": 35,
+    "contrast": 50,
+    "saturation": 40,
+}
 
 
 class UsbCameraSource(CameraSource):
@@ -19,12 +28,14 @@ class UsbCameraSource(CameraSource):
         fps: int,
         device: str = "/dev/video0",
         warmup: float = 1.0,
+        controls: dict[str, int] | None = None,
     ) -> None:
         self.width = width
         self.height = height
         self.fps = fps
         self.device = device
         self.warmup = warmup
+        self.controls = DEFAULT_V4L2_CONTROLS if controls is None else dict(controls)
         self._capture: Any | None = None
 
     def start(self) -> None:
@@ -46,6 +57,8 @@ class UsbCameraSource(CameraSource):
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         capture.set(cv2.CAP_PROP_FPS, self.fps)
         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        self._apply_v4l2_controls()
 
         deadline = monotonic() + max(self.warmup, 0.5)
         first_frame = None
@@ -94,6 +107,29 @@ class UsbCameraSource(CameraSource):
             capture.release()
         except Exception:
             pass
+
+    def _apply_v4l2_controls(self) -> None:
+        if not self.controls:
+            return
+        binary = shutil.which("v4l2-ctl")
+        if binary is None:
+            print("v4l2-ctl not found; skipping USB capture color controls.")
+            return
+        applied: list[str] = []
+        for name, value in self.controls.items():
+            try:
+                subprocess.run(
+                    [binary, "--device", self.device, f"--set-ctrl={name}={value}"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                applied.append(f"{name}={value}")
+            except subprocess.CalledProcessError as exc:
+                stderr = (exc.stderr or "").strip()
+                print(f"v4l2-ctl could not set {name}={value} on {self.device}: {stderr}")
+        if applied:
+            print(f"USB capture controls: {' '.join(applied)}")
 
     @staticmethod
     def _resolve_device_index(device: str) -> Any:
