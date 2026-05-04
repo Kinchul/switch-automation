@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import sys
-import threading
-import time
 from typing import Any
 
 
@@ -21,13 +19,7 @@ class BacklightController:
     flaky. We keep the request alive for the controller's lifetime.
     """
 
-    def __init__(
-        self,
-        *,
-        chip: str = "/dev/gpiochip0",
-        line: int = 18,
-        pwm_frequency_hz: float = 200.0,
-    ) -> None:
+    def __init__(self, *, chip: str = "/dev/gpiochip0", line: int = 18) -> None:
         self._chip_path = chip
         self._line = line
         self._request: Any = None
@@ -37,14 +29,6 @@ class BacklightController:
         self._on = True
         self._available = False
         self._fallback_blackout = False
-        # Software-PWM brightness. ``brightness`` is in [0.0, 1.0]; 1.0 means
-        # the line is held high continuously (no PWM thread needed). Values
-        # < 1.0 spin a thread that toggles the line at ``pwm_frequency_hz``.
-        self._brightness = 1.0
-        self._pwm_period_s = 1.0 / max(1.0, pwm_frequency_hz)
-        self._pwm_thread: threading.Thread | None = None
-        self._pwm_stop = threading.Event()
-        self._pwm_lock = threading.Lock()
 
     def start(self) -> None:
         try:
@@ -97,94 +81,19 @@ class BacklightController:
     def is_on(self) -> bool:
         return self._on
 
-    @property
-    def brightness(self) -> float:
-        return self._brightness
-
     def set_on(self, on: bool) -> None:
         if on == self._on:
             return
         self._on = on
-        self._apply_state()
-
-    def set_brightness(self, brightness: float) -> None:
-        """Set backlight brightness in [0.0, 1.0].
-
-        At 1.0 the line is held high continuously. Below 1.0 a software PWM
-        thread toggles the line at ~200 Hz (well above the visible flicker
-        threshold for an LED backlight, with negligible CPU cost).
-        """
-        clamped = max(0.0, min(1.0, brightness))
-        self._brightness = clamped
-        self._apply_state()
-
-    def _apply_state(self) -> None:
         if not self._available or self._request is None:
             return
-        # Stop any running PWM thread before changing direction.
-        self._stop_pwm()
-        if not self._on:
-            try:
-                self._request.set_value(self._line, self._line_value_off)
-            except Exception as exc:
-                print(f"Backlight set_value(off) failed: {exc}", file=sys.stderr)
-            return
-        if self._brightness >= 0.999:
-            try:
-                self._request.set_value(self._line, self._line_value_on)
-            except Exception as exc:
-                print(f"Backlight set_value(on) failed: {exc}", file=sys.stderr)
-            return
-        if self._brightness <= 0.001:
-            try:
-                self._request.set_value(self._line, self._line_value_off)
-            except Exception as exc:
-                print(f"Backlight set_value(off) failed: {exc}", file=sys.stderr)
-            return
-        self._start_pwm()
-
-    def _start_pwm(self) -> None:
-        with self._pwm_lock:
-            self._pwm_stop = threading.Event()
-            self._pwm_thread = threading.Thread(
-                target=self._pwm_loop,
-                name="backlight-pwm",
-                daemon=True,
-            )
-            self._pwm_thread.start()
-
-    def _stop_pwm(self) -> None:
-        with self._pwm_lock:
-            thread = self._pwm_thread
-            self._pwm_thread = None
-        if thread is not None:
-            self._pwm_stop.set()
-            thread.join(timeout=0.5)
-
-    def _pwm_loop(self) -> None:
-        period = self._pwm_period_s
-        on_time = period * self._brightness
-        off_time = period - on_time
-        while not self._pwm_stop.is_set():
-            # Re-read brightness each cycle so changes take effect within one
-            # period without restarting the thread.
-            on_time = period * self._brightness
-            off_time = period - on_time
-            try:
-                self._request.set_value(self._line, self._line_value_on)
-            except Exception:
-                return
-            if self._pwm_stop.wait(on_time):
-                break
-            try:
-                self._request.set_value(self._line, self._line_value_off)
-            except Exception:
-                return
-            if self._pwm_stop.wait(off_time):
-                break
+        try:
+            value = self._line_value_on if on else self._line_value_off
+            self._request.set_value(self._line, value)
+        except Exception as exc:
+            print(f"Backlight set_on({on}) failed: {exc}", file=sys.stderr)
 
     def close(self) -> None:
-        self._stop_pwm()
         if self._request is None:
             return
         try:
