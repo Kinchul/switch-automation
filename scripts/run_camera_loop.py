@@ -57,8 +57,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--width", type=int, default=1920)
     parser.add_argument("--height", type=int, default=1080)
-    parser.add_argument("--fps", type=int, default=20)
+    parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--warmup", type=float, default=2.0)
+    parser.add_argument(
+        "--usb-device",
+        type=str,
+        default="/dev/video0",
+        help="V4L2 device path for the USB HDMI grabber (UVC, MJPG).",
+    )
     parser.add_argument(
         "--camera-controls-file",
         type=Path,
@@ -396,6 +402,7 @@ def main() -> int:
         fps=args.fps,
         warmup=args.warmup,
         controls_path=args.camera_controls_file,
+        usb_device=args.usb_device,
     )
 
     controller = NxbtBackend(

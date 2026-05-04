@@ -47,6 +47,7 @@ class CameraCapture:
     warmup: float = 2.0
     lock_auto_controls: bool = True
     controls_path: Path | None = None
+    usb_device: str = "/dev/video0"
     preferred_sources: tuple[str, ...] = ("usb", "csi", "black")
     _source: CameraSource | None = field(init=False, default=None, repr=False)
     _frame_lock: Lock = field(init=False, default_factory=Lock, repr=False)
@@ -75,7 +76,13 @@ class CameraCapture:
 
     def _build_source(self, name: str) -> CameraSource:
         if name == "usb":
-            return UsbCameraSource(width=self.width, height=self.height, fps=self.fps)
+            return UsbCameraSource(
+                width=self.width,
+                height=self.height,
+                fps=self.fps,
+                device=self.usb_device,
+                warmup=self.warmup,
+            )
         if name == "csi":
             return CsiCameraSource(
                 camera_index=self.camera_index,
@@ -176,6 +183,7 @@ def open_capture(
     warmup: float = 2.0,
     lock_auto_controls: bool = True,
     controls_path: str | Path | None = None,
+    usb_device: str = "/dev/video0",
     preferred_sources: tuple[str, ...] = ("usb", "csi", "black"),
 ) -> CameraCapture:
     return CameraCapture(
@@ -186,5 +194,6 @@ def open_capture(
         warmup=warmup,
         lock_auto_controls=lock_auto_controls,
         controls_path=None if controls_path in (None, "") else Path(controls_path),
+        usb_device=usb_device,
         preferred_sources=preferred_sources,
     ).start()
