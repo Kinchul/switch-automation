@@ -127,6 +127,7 @@ class TouchReader:
 
     device_path: str = "/dev/input/event4"
     on_tap: Callable[[TouchEvent], None] | None = None
+    on_press: Callable[[int, int], None] | None = None
     on_raw_press: Callable[[int, int], None] | None = None
     on_any_activity: Callable[[], None] | None = None
     min_press_ms: int = 10
@@ -291,6 +292,13 @@ class TouchReader:
                 self.on_any_activity()
             except Exception as exc:
                 print(f"on_any_activity error: {exc}", file=sys.stderr)
+        if self.on_press is not None:
+            with self._calib_lock:
+                px, py = self._calibration.map(raw_x, raw_y)
+            try:
+                self.on_press(px, py)
+            except Exception as exc:
+                print(f"on_press error: {exc}", file=sys.stderr)
 
     def _handle_release(
         self,

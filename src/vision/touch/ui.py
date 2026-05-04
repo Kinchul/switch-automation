@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..hud import OverlayButton, OverlayState
+from ..hud import OverlayButton, OverlayRipple, OverlayState
 from .backlight import BacklightController
 from .reader import TouchCalibration, TouchReader, load_calibration, save_calibration
 
@@ -76,9 +76,11 @@ class TouchUi:
         self._calibration_step = 0
         self._calibration_raws: list[tuple[int, int]] = []
         self._seq_picker_offset = 0
+        self._ripples: list[OverlayRipple] = []
 
         self.reader.set_calibration(self._display_state.calibration)
         self.reader.on_tap = self._on_tap
+        self.reader.on_press = self._on_press
         self.reader.on_any_activity = self._on_any_activity
 
         # Force calibration on first run (no saved state file). The user can't
@@ -103,14 +105,18 @@ class TouchUi:
         ``base`` is the shared overlay state (what MJPEG gets). We pick
         elements from it depending on mode rather than mutate it.
         """
+        now = time.monotonic()
         with self._lock:
             mode = self._mode
             toast = self._current_toast_locked()
+            cutoff = now - _RIPPLE_DURATION_S
+            self._ripples = [r for r in self._ripples if r.started_monotonic >= cutoff]
+            ripples = list(self._ripples)
 
         if mode == "display_off":
             # Independent of backlight availability: blackout for safety so
             # the panel goes dark even if GPIO control failed.
-            return OverlayState(blackout=True)
+            return OverlayState(blackout=True, ripples=ripples)
 
         if mode == "none":
             state = OverlayState()
@@ -143,6 +149,8 @@ class TouchUi:
         if toast:
             # Show toast in bottom-right of panel as a small line.
             state.bottom_right_lines = [toast] + list(state.bottom_right_lines)
+        if ripples:
+            state.ripples = ripples
         return state
 
     def close(self) -> None:
@@ -163,6 +171,15 @@ class TouchUi:
             if self._mode == "display_off":
                 self._wake_locked()
 
+    def _on_press(self, x: int, y: int) -> None:
+        """Record a tap ripple in panel coordinates for visual feedback."""
+        now = time.monotonic()
+        with self._lock:
+            self._ripples.append(OverlayRipple(x=x, y=y, started_monotonic=now))
+            # Expire old ripples and keep the list bounded.
+            cutoff = now - _RIPPLE_DURATION_S
+            self._ripples = [r for r in self._ripples if r.started_monotonic >= cutoff][-8:]
+
     def _on_tap(self, event) -> None:
         x, y = event.x, event.y
         with self._lock:
@@ -182,9 +199,10 @@ class TouchUi:
             return
         if mode == "home":
             # Home is part of the cycle: tapping outside any button advances
-            # the cycle back to "none". Buttons themselves capture their taps.
+            # to the next mode (back to "none"). Buttons themselves capture
+            # their taps.
             if not self._handle_button_tap_locked(self._home_buttons(), x, y):
-                self._mode = "hud_only"
+                self._advance_cycle_locked()
             return
         if mode == "action":
             self._handle_button_tap_locked(self._action_buttons(), x, y)
@@ -517,6 +535,7 @@ class TouchUi:
 
 
 _SEQ_PAGE_SIZE = 6
+_RIPPLE_DURATION_S = 0.6
 
 
 def _grid(

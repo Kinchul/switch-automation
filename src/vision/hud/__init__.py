@@ -1,3 +1,3 @@
-from .overlay import OverlayBox, OverlayButton, OverlayState, draw_overlay
+from .overlay import OverlayBox, OverlayButton, OverlayRipple, OverlayState, draw_overlay
 
-__all__ = ["OverlayBox", "OverlayButton", "OverlayState", "draw_overlay"]
+__all__ = ["OverlayBox", "OverlayButton", "OverlayRipple", "OverlayState", "draw_overlay"]

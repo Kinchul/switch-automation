@@ -27,6 +27,13 @@ class OverlayButton:
 
 
 @dataclass(slots=True)
+class OverlayRipple:
+    x: int
+    y: int
+    started_monotonic: float
+
+
+@dataclass(slots=True)
 class OverlayState:
     lines: list[str] = field(default_factory=list)
     top_left_lines: list[str] = field(default_factory=list)
@@ -42,6 +49,10 @@ class OverlayState:
     # for the "display off" state on the local panel without affecting the
     # MJPEG stream.
     blackout: bool = False
+    # Transient circle animations at tap coordinates (panel pixel space). Each
+    # ripple expands and fades over ~600 ms; older ones are filtered by the
+    # caller before being attached to the overlay.
+    ripples: list[OverlayRipple] = field(default_factory=list)
 
 
 def draw_overlay(frame, overlay: OverlayState):
@@ -55,6 +66,7 @@ def draw_overlay(frame, overlay: OverlayState):
         and not overlay.banner
         and not overlay.buttons
         and not overlay.blackout
+        and not overlay.ripples
     ):
         return frame
 
@@ -88,6 +100,9 @@ def draw_overlay(frame, overlay: OverlayState):
 
     if overlay.buttons:
         _draw_buttons(draw, overlay.buttons, font=font, frame_width=frame.shape[1], frame_height=frame.shape[0])
+
+    if overlay.ripples:
+        _draw_ripples(draw, overlay.ripples, frame_width=frame.shape[1], frame_height=frame.shape[0])
 
     for lines, anchor in (
         (overlay.lines, "bottom_left"),
@@ -205,6 +220,33 @@ def _draw_buttons(draw, buttons: list[OverlayButton], *, font, frame_width: int,
         cx = (left + right) // 2 - text_w // 2 - bbox[0]
         cy = (top + bottom) // 2 - text_h // 2 - bbox[1]
         draw.text((cx, cy), btn.label, font=font, fill=(255, 255, 255, 255))
+
+
+_RIPPLE_DURATION_S = 0.6
+_RIPPLE_MAX_RADIUS_PX = 50
+
+
+def _draw_ripples(draw, ripples: list[OverlayRipple], *, frame_width: int, frame_height: int) -> None:
+    now = time.monotonic()
+    for ripple in ripples:
+        age = now - ripple.started_monotonic
+        if age < 0 or age > _RIPPLE_DURATION_S:
+            continue
+        progress = age / _RIPPLE_DURATION_S
+        radius = int(_RIPPLE_MAX_RADIUS_PX * progress)
+        # Fade alpha from 230 → 0 as the ripple expands.
+        alpha = int(230 * (1.0 - progress))
+        if radius < 2 or alpha <= 4:
+            continue
+        x = max(0, min(frame_width - 1, ripple.x))
+        y = max(0, min(frame_height - 1, ripple.y))
+        bbox = (x - radius, y - radius, x + radius, y + radius)
+        draw.ellipse(bbox, outline=(120, 220, 255, alpha), width=3)
+        # Solid centre dot for the first ~120 ms so quick taps still show even
+        # if the outline is small.
+        if age < 0.12:
+            r = 6
+            draw.ellipse((x - r, y - r, x + r, y + r), fill=(120, 220, 255, 220))
 
 
 def _draw_banner(draw, text: str, *, frame_width: int, frame_height: int) -> None:
