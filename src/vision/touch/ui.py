@@ -32,7 +32,11 @@ class TouchUiConfig:
 @dataclass(slots=True)
 class _DisplayState:
     rotation_quarter_turns: int = 0
+    brightness: float = 1.0
     calibration: TouchCalibration = field(default_factory=TouchCalibration)
+
+
+_BRIGHTNESS_LEVELS: tuple[float, ...] = (1.0, 0.75, 0.5, 0.25)
 
 
 class TouchUi:
@@ -82,6 +86,14 @@ class TouchUi:
         self.reader.on_tap = self._on_tap
         self.reader.on_press = self._on_press
         self.reader.on_any_activity = self._on_any_activity
+        # Apply persisted brightness as soon as the backlight is up. If the
+        # backlight controller hasn't started yet this is a no-op until the
+        # caller calls ``backlight.start()``; the value is also re-applied via
+        # ``set_brightness`` whenever the user adjusts it.
+        try:
+            self.backlight.set_brightness(self._display_state.brightness)
+        except Exception:
+            pass
 
         # Force calibration on first run (no saved state file). The user can't
         # interact reliably without it, so make this the very first overlay.
@@ -122,7 +134,10 @@ class TouchUi:
             return OverlayState(blackout=True, ripples=ripples)
 
         if mode == "none":
-            state = OverlayState()
+            # Keep the NO IMAGE banner — it's part of the camera placeholder,
+            # not a HUD element, and should always be visible when the camera
+            # has fallen back to the black source.
+            state = OverlayState(banner=base.banner)
         elif mode == "hud_only":
             state = OverlayState(
                 top_left_lines=list(base.top_left_lines),
@@ -301,6 +316,9 @@ class TouchUi:
         if button_id == "disp_rotate":
             self._cycle_rotation_locked()
             return
+        if button_id == "disp_brightness":
+            self._cycle_brightness_locked()
+            return
 
         if button_id.startswith("seq_pick:"):
             sequence_id = button_id.split(":", 1)[1]
@@ -332,6 +350,20 @@ class TouchUi:
         self._mode = self._previous_mode_before_off
 
     # ---- rotation ------------------------------------------------------
+
+    def _cycle_brightness_locked(self) -> None:
+        try:
+            idx = _BRIGHTNESS_LEVELS.index(self._display_state.brightness)
+        except ValueError:
+            idx = 0
+        next_level = _BRIGHTNESS_LEVELS[(idx + 1) % len(_BRIGHTNESS_LEVELS)]
+        self._display_state.brightness = next_level
+        try:
+            self.backlight.set_brightness(next_level)
+        except Exception as exc:
+            print(f"TouchUi: backlight.set_brightness failed: {exc}", file=sys.stderr)
+        _save_display_state(self.config.state_file, self._display_state)
+        self._set_toast_locked(f"bright {int(round(next_level * 100))}%")
 
     def _cycle_rotation_locked(self) -> None:
         # Step by 2 quarter-turns so the rotated render still matches the
@@ -475,6 +507,7 @@ class TouchUi:
         )
 
     def _display_buttons(self) -> list[OverlayButton]:
+        brightness_pct = int(round(self._display_state.brightness * 100))
         return _grid(
             self.config.panel_width,
             self.config.panel_height,
@@ -482,10 +515,14 @@ class TouchUi:
                 ("Off", "disp_off"),
                 ("Calibrate", "disp_calibrate"),
                 ("Rotate", "disp_rotate"),
+                (f"Bright {brightness_pct}%", "disp_brightness"),
                 ("Back", "back_home"),
             ],
-            cols=2,
+            cols=3,
             rows=2,
+            top_inset_px=self.config.panel_height // 5,
+            bottom_inset_px=self.config.panel_height // 5,
+            skip_blank_labels=True,
         )
 
     def _sequence_buttons(self) -> list[OverlayButton]:
@@ -599,6 +636,8 @@ def _load_display_state(path: Path) -> tuple[_DisplayState, bool]:
         print(f"TouchUi: could not load {path}: {exc}", file=sys.stderr)
         return _DisplayState(), False
     rotation = int(data.get("rotation_quarter_turns", 0)) % 4
+    brightness = float(data.get("brightness", 1.0))
+    brightness = max(0.0, min(1.0, brightness))
     calib_raw = data.get("calibration")
     # Only treat the file as calibrated when the affine "a" key is present —
     # legacy min/max calibrations are not migrated and need a fresh fit.
@@ -608,13 +647,21 @@ def _load_display_state(path: Path) -> tuple[_DisplayState, bool]:
     else:
         calibration = TouchCalibration()
     calibration.rotation_quarter_turns = rotation
-    return _DisplayState(rotation_quarter_turns=rotation, calibration=calibration), has_calibration
+    return (
+        _DisplayState(
+            rotation_quarter_turns=rotation,
+            brightness=brightness,
+            calibration=calibration,
+        ),
+        has_calibration,
+    )
 
 
 def _save_display_state(path: Path, state: _DisplayState) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "rotation_quarter_turns": state.rotation_quarter_turns,
+        "brightness": state.brightness,
         "calibration": state.calibration.to_json(),
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
