@@ -6,7 +6,7 @@ Automate a Nintendo Switch from a Raspberry Pi by separating:
 - `vision`: camera capture plus static-image matching
 - `sequence`: JSON-defined automation flows
 
-The active sequence files live in `sequences/`. The default one is [sulfura.json](</c:/Users/vkind/Documents/GitHub/switch-automation/sequences/sulfura.json>).
+The active sequence files live in `sequences/`. The default one is [sulfura.json](/c:/Users/vkind/Documents/GitHub/switch-automation/sequences/sulfura.json).
 
 ## Project Layout
 
@@ -109,7 +109,7 @@ Top-level fields:
 `defaults.scene` fields:
 
 - `threshold`: number. Optional default match threshold. If omitted here, every state must define its own.
-- `search_margin`: integer. Pixel radius around the ROI within which the detector slides the template. Higher values tolerate more positional drift but are slower. Default: `24`.
+- `search_margin`: integer. Pixel radius around the ROI within which the detector slides the template. Higher values tolerate more positional drift but are slower. Default: `5`.
 - `stride`: integer. Pixel pooling factor applied to both the reference crop and the search area before comparison. `4` means each `4x4` block is averaged into one comparison sample. Higher values are faster but less precise. Default: `4`.
 - `search_step`: integer. Step size in original pixels between candidate positions inside the search area. Must be ≥ `stride`; the detector converts it to downsampled steps internally. Larger values skip more positions (faster, coarser). Default: `2`.
 - `hold_ms`: integer. How long in milliseconds a match must remain continuously visible before the state is accepted. `0` means a single matching frame is enough. Default: `0`.

@@ -1,0 +1,177 @@
+{
+  "success_rate": 0.0001220703125,
+  "recovery": {
+    "states": [
+      "fight_started",
+      "ready",
+      "continue",
+      "previously",
+      "press_start"
+    ],
+    "timeout_ms": 12000
+  },
+  "defaults": {
+    "timeout_ms": 7000,
+    "scene": {
+      "search_margin": 1,
+      "stride": 4,
+      "search_step": 4,
+      "hold_ms": 0,
+      "score_window": 3,
+      "luma_weight": 0.7,
+      "chroma_weight": 0.3
+    },
+    "action": {
+      "frequency_hz": 1.0,
+      "down_ms": 50,
+      "up_ms": 150
+    }
+  },
+  "states": {
+    "game_launch": {
+      "scene": {
+        "image_path": "../images/lugia/0_game_launch.png",
+        "roi": {
+          "x": 552,
+          "y": 317,
+          "width": 815,
+          "height": 368
+        },
+        "threshold": 0.005,
+        "stride": 8,
+        "search_step": 4
+      },
+      "next_states": ["press_start", "fight_started"],
+      "timeout_ms": 3000,
+      "action": {
+        "buttons": ["A"]
+      }
+    },
+    "press_start": {
+      "scene": {
+        "image_path": "../images/lugia/1_press_start.png",
+        "roi": {
+          "x": 494,
+          "y": 966,
+          "width": 933,
+          "height": 52
+        },
+        "threshold": 0.005,
+        "stride": 6,
+        "search_step": 4
+      },
+      "next_states": ["previously", "ready", "fight_started"],
+      "timeout_ms": 5500,
+      "action": {
+        "buttons": ["A"]
+      }
+    },
+    "continue": {
+      "scene": {
+        "image_path": "../images/lugia/2_select_save.png",
+        "roi": {
+          "x": 366,
+          "y": 404,
+          "width": 271,
+          "height": 62
+        },
+        "threshold": 0.0075,
+        "stride": 2,
+        "search_step": 4
+      },
+      "next_states": ["previously"],
+      "timeout_ms": 2000,
+      "action": {
+        "buttons": ["A"],
+        "frequency_hz": 0
+      }
+    },
+    "previously": {
+      "scene": {
+        "image_path": "../images/lugia/3_previously.png",
+        "roi": {
+          "x": 686,
+          "y": 55,
+          "width": 356,
+          "height": 63
+        },
+        "threshold": 0.0075,
+        "stride": 2,
+        "search_step": 4
+      },
+      "next_states": ["ready"],
+      "timeout_ms": 3000,
+      "action": {
+        "buttons": ["B"]
+      }
+    },
+    "ready": {
+      "scene": {
+        "image_path": "../images/lugia/4_ready.png",
+        "roi": {
+          "x": 882,
+          "y": 332,
+          "width": 146,
+          "height": 238
+        },
+        "threshold": 0.005,
+        "stride": 4,
+        "search_step": 4
+      },
+      "next_states": ["fight_started"],
+      "timeout_ms": 12000,
+      "action": {
+        "buttons": ["A"]
+      }
+    },
+    "fight_started": {
+      "scene": {
+        "image_path": "../images/lugia/5_target_failed.png",
+        "roi": {
+          "x": 334,
+          "y": 157,
+          "width": 152,
+          "height": 49
+        },
+        "threshold": 0.005,
+        "stride": 4,
+        "search_step": 4
+      },
+      "next_states": ["target_detect"],
+      "timeout_ms": 3000
+    },
+    "target_detect": {
+      "next_states": ["target_failed"],
+      "timeout_ms": 3000,
+      "timeout_next_state": "target_ok",
+      "decision_mode": "loop_baseline_step",
+      "decision_history_window": 11,
+      "decision_trend_window": 5,
+      "decision_ok_step": 0.005
+    },
+    "target_failed": {
+      "scene": {
+        "image_path": "../images/lugia/5_target_failed.png",
+        "roi": {
+          "x": 1114,
+          "y": 44,
+          "width": 394,
+          "height": 395
+        },
+        "threshold": 0.005,
+        "search_margin": 1,
+        "stride": 4,
+        "search_step": 2,
+        "score_window": 3,
+        "luma_weight": 0.25,
+        "chroma_weight": 0.75
+      },
+      "next_states": ["game_launch"],
+      "reset_loop": true
+    },
+    "target_ok": {
+      "next_states": [],
+      "notification": "mail"
+    }
+  }
+}
