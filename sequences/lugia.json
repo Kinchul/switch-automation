@@ -42,7 +42,7 @@
         "search_step": 4
       },
       "next_states": ["press_start", "fight_started"],
-      "timeout_ms": 3000,
+      "timeout_ms": 3500,
       "action": {
         "buttons": ["A"]
       }
@@ -114,12 +114,12 @@
           "width": 146,
           "height": 238
         },
-        "threshold": 0.1,
+        "threshold": 0.06,
         "stride": 4,
         "search_step": 4
       },
       "next_states": ["fight_started"],
-      "timeout_ms": 12000,
+      "timeout_ms": 13000,
       "action": {
         "buttons": ["A"]
       }
@@ -158,7 +158,7 @@
           "width": 394,
           "height": 395
         },
-        "threshold": 0.05,
+        "threshold": 0.025,
         "search_margin": 1,
         "stride": 4,
         "search_step": 2,
