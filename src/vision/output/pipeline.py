@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
+from dataclasses import replace as dataclass_replace
+
 from ..capture import CameraCapture
 from ..hud import OverlayState, draw_overlay
 from .base import FrameSink
@@ -106,24 +108,54 @@ class OutputPipeline:
         if not sizes:
             sizes = {None}
         rendered: dict[tuple[int, int] | None, object] = {}
+        src_h, src_w = frame.shape[:2]
         for size in sizes:
             if size is None:
                 rendered[size] = draw_overlay(frame, overlay)
             else:
                 resized = _fit_letterbox(frame, *size)
-                rendered[size] = draw_overlay(resized, overlay)
+                rendered[size] = draw_overlay(resized, _rescale_boxes(overlay, src_w, src_h, *size))
         return rendered
 
     def _render_for_sink(self, frame, target_size, overlay):
         if target_size is None:
             return draw_overlay(frame, overlay)
         resized = _fit_letterbox(frame, *target_size)
-        return draw_overlay(resized, overlay)
+        src_h, src_w = frame.shape[:2]
+        return draw_overlay(resized, _rescale_boxes(overlay, src_w, src_h, *target_size))
 
     def _current_overlay_state(self) -> OverlayState:
         if self.overlay_state_fn is not None:
             return self.overlay_state_fn()
         return OverlayState()
+
+
+def _rescale_boxes(overlay: OverlayState, src_w: int, src_h: int, target_w: int, target_h: int) -> OverlayState:
+    """Map ``overlay.boxes`` from capture-frame coords into the letterboxed target.
+
+    Boxes from the camera loop are emitted in capture resolution; sinks that
+    letterbox down (e.g. the framebuffer panel) need them remapped so the ROI
+    rectangle lands on the same pixels the user sees. Other overlay entries
+    (buttons, ripples) are already authored in panel space and are left alone.
+    """
+    if not overlay.boxes or (src_w, src_h) == (target_w, target_h):
+        return overlay
+    scale = min(target_w / src_w, target_h / src_h)
+    new_w = max(1, int(src_w * scale))
+    new_h = max(1, int(src_h * scale))
+    off_x = (target_w - new_w) // 2
+    off_y = (target_h - new_h) // 2
+    new_boxes = [
+        dataclass_replace(
+            box,
+            x=int(round(box.x * scale)) + off_x,
+            y=int(round(box.y * scale)) + off_y,
+            width=max(1, int(round(box.width * scale))),
+            height=max(1, int(round(box.height * scale))),
+        )
+        for box in overlay.boxes
+    ]
+    return dataclass_replace(overlay, boxes=new_boxes)
 
 
 def _fit_letterbox(frame, target_w: int, target_h: int):
