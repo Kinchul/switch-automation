@@ -19,6 +19,12 @@ from .reader import TouchCalibration, TouchReader, load_calibration, save_calibr
 # entered explicitly and only the dedicated Exit button leaves them.
 _CYCLE_MODES: tuple[str, ...] = ("none", "hud_only")
 
+# Modes worth restoring across reboots. Transient modes (menus, calibration,
+# sequence picker) deliberately fall back to ``hud_only`` so users don't boot
+# into a half-finished interaction. ``display_off`` is included only when the
+# user explicitly chose it via the Off button — auto-sleep does not persist.
+_PERSISTABLE_MODES: frozenset[str] = frozenset({"none", "hud_only", "home", "display_off"})
+
 
 @dataclass(slots=True)
 class TouchUiConfig:
@@ -34,6 +40,10 @@ class _DisplayState:
     rotation_quarter_turns: int = 0
     auto_off_seconds: int = 600  # 0 = disabled
     calibration: TouchCalibration = field(default_factory=TouchCalibration)
+    # Last user-chosen overlay mode. Auto-sleep deliberately does not write
+    # here, so a power-cycle after the panel auto-off boots back into the
+    # previous interactive mode rather than a black screen.
+    persisted_mode: str = "hud_only"
 
 
 # Cycle of auto-off timeouts, in seconds. ``0`` means "disabled".
@@ -103,11 +113,20 @@ class TouchUi:
             self._calibration_raws = []
             self.reader.set_raw_listener(self._on_calibration_tap)
         else:
-            self._mode = (
-                config.initial_mode
-                if config.initial_mode in _CYCLE_MODES + ("home",)
-                else "hud_only"
-            )
+            restored = self._display_state.persisted_mode
+            if restored in _PERSISTABLE_MODES:
+                self._mode = restored
+            else:
+                self._mode = (
+                    config.initial_mode
+                    if config.initial_mode in _CYCLE_MODES + ("home",)
+                    else "hud_only"
+                )
+            if self._mode == "display_off":
+                # User explicitly turned the panel off before the last shutdown.
+                # Auto-sleep never writes display_off to disk, so this branch
+                # only fires for an intentional Off press.
+                self.backlight.set_on(False)
 
     # ---- public API ----------------------------------------------------
 
@@ -272,8 +291,24 @@ class TouchUi:
             idx = cycle.index(self._mode)
         except ValueError:
             self._mode = cycle[0]
+        else:
+            self._mode = cycle[(idx + 1) % len(cycle)]
+        self._persist_mode_locked(self._mode)
+
+    def _persist_mode_locked(self, mode: str) -> None:
+        """Write ``mode`` as the persisted overlay mode if it qualifies.
+
+        Only modes in ``_PERSISTABLE_MODES`` are kept across reboots; transient
+        modes like menus or calibration always fall back to ``hud_only`` on
+        boot. Saves are skipped when the value would not change, so callers
+        can invoke this freely on every user-initiated transition.
+        """
+        if mode not in _PERSISTABLE_MODES:
             return
-        self._mode = cycle[(idx + 1) % len(cycle)]
+        if self._display_state.persisted_mode == mode:
+            return
+        self._display_state.persisted_mode = mode
+        _save_display_state(self.config.state_file, self._display_state)
 
     def _handle_button_tap_locked(
         self, buttons: Iterable[OverlayButton], x: int, y: int
@@ -288,9 +323,11 @@ class TouchUi:
     def _on_button_locked(self, button_id: str) -> None:
         if button_id == "exit":
             self._mode = "hud_only"
+            self._persist_mode_locked(self._mode)
             return
         if button_id == "back_home":
             self._mode = "home"
+            self._persist_mode_locked(self._mode)
             return
 
         if button_id == "menu_action":
@@ -316,7 +353,7 @@ class TouchUi:
             return
 
         if button_id == "disp_off":
-            self._sleep_locked()
+            self._sleep_locked(persist=True)
             return
         if button_id == "disp_calibrate":
             self._begin_calibration_locked()
@@ -362,10 +399,15 @@ class TouchUi:
             return
         self._sleep_locked()
 
-    def _sleep_locked(self) -> None:
+    def _sleep_locked(self, *, persist: bool = False) -> None:
+        # ``persist=True`` only when the user pressed Off. Auto-sleep keeps the
+        # in-memory mode but leaves the persisted mode untouched, so a reboot
+        # after an unattended auto-off comes back up with the panel on.
         self._previous_mode_before_off = "none"
         self._mode = "display_off"
         self.backlight.set_on(False)
+        if persist:
+            self._persist_mode_locked("display_off")
 
     def _wake_locked(self) -> None:
         self.backlight.set_on(True)
@@ -373,6 +415,7 @@ class TouchUi:
         # as a cycle/UI tap — set a short "swallow" window so _on_tap ignores
         # the imminent release event.
         self._mode = "none"
+        self._persist_mode_locked(self._mode)
         self._wake_swallow_until_monotonic = time.monotonic() + 0.6
         self._last_activity_monotonic = time.monotonic()
 
@@ -664,6 +707,9 @@ def _load_display_state(path: Path) -> tuple[_DisplayState, bool]:
     if auto_off not in _AUTO_OFF_LEVELS:
         # Snap to nearest level so the cycle button stays predictable.
         auto_off = min(_AUTO_OFF_LEVELS, key=lambda v: abs(v - auto_off))
+    persisted_mode = str(data.get("persisted_mode", "hud_only"))
+    if persisted_mode not in _PERSISTABLE_MODES:
+        persisted_mode = "hud_only"
     calib_raw = data.get("calibration")
     # Only treat the file as calibrated when the affine "a" key is present —
     # legacy min/max calibrations are not migrated and need a fresh fit.
@@ -678,6 +724,7 @@ def _load_display_state(path: Path) -> tuple[_DisplayState, bool]:
             rotation_quarter_turns=rotation,
             auto_off_seconds=auto_off,
             calibration=calibration,
+            persisted_mode=persisted_mode,
         ),
         has_calibration,
     )
@@ -688,6 +735,7 @@ def _save_display_state(path: Path, state: _DisplayState) -> None:
     payload = {
         "rotation_quarter_turns": state.rotation_quarter_turns,
         "auto_off_seconds": state.auto_off_seconds,
+        "persisted_mode": state.persisted_mode,
         "calibration": state.calibration.to_json(),
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
