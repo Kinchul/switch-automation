@@ -43,6 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
             "reset_stats",
             "list-sequences",
             "list_sequences",
+            "hide-hud",
+            "hide_hud",
+            "show-hud",
+            "show_hud",
+            "toggle-hud",
+            "toggle_hud",
         ],
         default="run",
         help=(
@@ -50,7 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
             "`restart` triggers a new loop, `reset` forces a game reset then starts a new loop, "
             "`stop` idles the service, `status` prints control and stats, `select-sequence` "
             "persists the sequence to use on the next restart, "
-            "`reset-stats` clears all per-sequence stats, and `list-sequences` lists the available JSON files."
+            "`reset-stats` clears all per-sequence stats, `list-sequences` lists the available JSON files, "
+            "and `hide-hud` / `show-hud` / `toggle-hud` control the stream HUD visibility on the running service."
         ),
     )
     parser.add_argument("--sequence", type=str, default=None, help="Sequence id for select-sequence.")
@@ -351,10 +358,23 @@ def _handle_control_action(args: argparse.Namespace) -> int:
                 print(f"{sequence_id}{marker}")
         return 0
 
+    if normalized_action in {"hide-hud", "show-hud", "toggle-hud"}:
+        control.refresh()
+        if normalized_action == "hide-hud":
+            visible = False
+        elif normalized_action == "show-hud":
+            visible = True
+        else:
+            visible = not control.hud_visible
+        control.set_hud_visible(visible)
+        print(f"hud_visible={visible}")
+        return 0
+
     if normalized_action == "status":
         command = control.refresh()
         print(f"command={command}")
         print(f"selected_sequence={control.selected_sequence}")
+        print(f"hud_visible={control.hud_visible}")
         print(f"control_file={args.control_file}")
         print(f"stats_file={args.stats_file}")
         if sequences:
@@ -422,6 +442,7 @@ def main() -> int:
         args=args,
         overlay_state_fn=runner.preview_overlay_state,
         touch_ui=touch_ui,
+        loop_control=runner.control,
     )
     if args.local_display:
         print(f"Local display configured on {args.local_display_fbdev}.")
@@ -429,6 +450,8 @@ def main() -> int:
     try:
         stats = runner.initialize()
         control = PersistentLoopControl.load(args.control_file)
+        if not control.hud_visible:
+            control.set_hud_visible(True)
         print(
             "Started in stopped state: "
             f"selected_sequence={control.selected_sequence} "
@@ -539,10 +562,17 @@ def _start_output_pipeline(
     args,
     overlay_state_fn,
     touch_ui=None,
+    loop_control=None,
 ):
     from vision import FramebufferSink, OutputPipeline
+    from vision.hud import OverlayState
 
-    mjpeg = _build_mjpeg_sink(args)
+    def _stream_overlay_transform(overlay):
+        if loop_control is not None and not loop_control.hud_visible:
+            return OverlayState()
+        return None
+
+    mjpeg = _build_mjpeg_sink(args, overlay_transform=_stream_overlay_transform)
     sinks = [mjpeg]
     if args.local_display:
         sinks.append(
@@ -607,7 +637,7 @@ def _start_touch_ui(args):
     return ui, reader, backlight
 
 
-def _build_mjpeg_sink(args):
+def _build_mjpeg_sink(args, *, overlay_transform=None):
     from vision import MjpegSink
 
     replaced_holder = False
@@ -615,6 +645,7 @@ def _build_mjpeg_sink(args):
         sink = MjpegSink(
             port=args.feed_port,
             target_fps=args.feed_fps,
+            overlay_transform=overlay_transform,
         )
         try:
             sink.start()

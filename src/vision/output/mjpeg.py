@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from socket import timeout as SocketTimeout
-from typing import Any, ClassVar
+from typing import Any, Callable, ClassVar
 
 from ..capture import encode_rgb_frame
 from .base import FrameSink
@@ -119,6 +119,7 @@ class MjpegSink(FrameSink):
     port: int = 8080
     target_fps: float = 5.0
     quality: int = 80
+    overlay_transform: Callable[[Any], Any] | None = None
     _latest_jpeg: bytes = field(init=False, default=b"", repr=False)
     _latest_lock: threading.Lock = field(init=False, default_factory=threading.Lock, repr=False)
     _frame_ready: threading.Event = field(init=False, default_factory=threading.Event, repr=False)
@@ -142,6 +143,11 @@ class MjpegSink(FrameSink):
         self._http_thread = threading.Thread(target=self._http_server.serve_forever, daemon=True)
         self._http_thread.start()
         self._interval = 1.0 / self.target_fps if self.target_fps > 0 else 0.2
+
+    def transform_overlay(self, overlay):
+        if self.overlay_transform is None:
+            return None
+        return self.overlay_transform(overlay)
 
     def consume(self, frame: Any) -> None:
         now = time.monotonic()

@@ -276,6 +276,7 @@ class PersistentLoopControl:
     path: Path
     command: str = "noop"
     selected_sequence: str | None = None
+    hud_visible: bool = True
     updated_at: str | None = None
 
     @classmethod
@@ -285,6 +286,7 @@ class PersistentLoopControl:
             path=path,
             command=str(data.get("command", "noop")) if isinstance(data, dict) else "noop",
             selected_sequence=(data.get("selected_sequence") if isinstance(data, dict) else None),  # type: ignore[arg-type]
+            hud_visible=bool(data.get("hud_visible", True)) if isinstance(data, dict) else True,
             updated_at=(data.get("updated_at") if isinstance(data, dict) else None),  # type: ignore[arg-type]
         )
 
@@ -296,6 +298,7 @@ class PersistentLoopControl:
             {
                 "command": self.command,
                 "selected_sequence": self.selected_sequence,
+                "hud_visible": self.hud_visible,
                 "updated_at": self.updated_at,
             },
         )
@@ -309,11 +312,16 @@ class PersistentLoopControl:
         self.selected_sequence = sequence_id
         self.save()
 
+    def set_hud_visible(self, visible: bool) -> None:
+        self.hud_visible = bool(visible)
+        self.save()
+
     def refresh(self) -> str:
         data = _load_json_object(self.path, label="control")
         if isinstance(data, dict):
             self.command = str(data.get("command", "noop"))
             self.selected_sequence = data.get("selected_sequence")  # type: ignore[arg-type]
+            self.hud_visible = bool(data.get("hud_visible", True))
             self.updated_at = data.get("updated_at")  # type: ignore[arg-type]
         return self.command
 
