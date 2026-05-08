@@ -37,7 +37,7 @@
           "width": 815,
           "height": 368
         },
-        "threshold": 0.005,
+        "threshold": 0.1,
         "stride": 8,
         "search_step": 4
       },
@@ -114,7 +114,7 @@
           "width": 146,
           "height": 238
         },
-        "threshold": 0.06,
+        "threshold": 0.08,
         "stride": 4,
         "search_step": 4
       },
@@ -147,7 +147,7 @@
       "decision_mode": "loop_baseline_step",
       "decision_history_window": 11,
       "decision_trend_window": 5,
-      "decision_ok_step": 0.005
+      "decision_ok_step": 0.002
     },
     "target_failed": {
       "scene": {
