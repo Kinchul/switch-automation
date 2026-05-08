@@ -8,7 +8,7 @@
       "previously",
       "press_start"
     ],
-    "timeout_ms": 12000
+    "timeout_ms": 15000
   },
   "defaults": {
     "timeout_ms": 7000,
@@ -56,7 +56,7 @@
           "width": 933,
           "height": 52
         },
-        "threshold": 0.005,
+        "threshold": 0.1,
         "stride": 6,
         "search_step": 4
       },
@@ -75,7 +75,7 @@
           "width": 271,
           "height": 62
         },
-        "threshold": 0.0075,
+        "threshold": 0.1,
         "stride": 2,
         "search_step": 4
       },
@@ -95,7 +95,7 @@
           "width": 356,
           "height": 63
         },
-        "threshold": 0.0075,
+        "threshold": 0.1,
         "stride": 2,
         "search_step": 4
       },
@@ -114,7 +114,7 @@
           "width": 146,
           "height": 238
         },
-        "threshold": 0.005,
+        "threshold": 0.1,
         "stride": 4,
         "search_step": 4
       },
@@ -133,7 +133,7 @@
           "width": 152,
           "height": 49
         },
-        "threshold": 0.005,
+        "threshold": 0.1,
         "stride": 4,
         "search_step": 4
       },
@@ -158,7 +158,7 @@
           "width": 394,
           "height": 395
         },
-        "threshold": 0.005,
+        "threshold": 0.05,
         "search_margin": 1,
         "stride": 4,
         "search_step": 2,
