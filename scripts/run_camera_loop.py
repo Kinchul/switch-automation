@@ -44,11 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
             "list-sequences",
             "list_sequences",
             "hide-hud",
-            "hide_hud",
             "show-hud",
-            "show_hud",
-            "toggle-hud",
-            "toggle_hud",
         ],
         default="run",
         help=(
@@ -57,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
             "`stop` idles the service, `status` prints control and stats, `select-sequence` "
             "persists the sequence to use on the next restart, "
             "`reset-stats` clears all per-sequence stats, `list-sequences` lists the available JSON files, "
-            "and `hide-hud` / `show-hud` / `toggle-hud` control the stream HUD visibility on the running service."
+            "and `hide-hud` / `show-hud` control the stream HUD visibility on the running service."
         ),
     )
     parser.add_argument("--sequence", type=str, default=None, help="Sequence id for select-sequence.")
@@ -358,14 +354,8 @@ def _handle_control_action(args: argparse.Namespace) -> int:
                 print(f"{sequence_id}{marker}")
         return 0
 
-    if normalized_action in {"hide-hud", "show-hud", "toggle-hud"}:
-        control.refresh()
-        if normalized_action == "hide-hud":
-            visible = False
-        elif normalized_action == "show-hud":
-            visible = True
-        else:
-            visible = not control.hud_visible
+    if normalized_action in {"hide-hud", "show-hud"}:
+        visible = normalized_action == "show-hud"
         control.set_hud_visible(visible)
         print(f"hud_visible={visible}")
         return 0
