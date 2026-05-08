@@ -172,6 +172,10 @@ def _draw_corner_lines(draw, lines: list[str], *, font, frame_width: int, frame_
 
 
 def _draw_boxes(draw, boxes: list[OverlayBox], *, font, frame_width: int, frame_height: int) -> None:
+    # Scale outline thickness with the frame's short side so a 320-tall panel
+    # gets a 2 px border while a 1080-tall capture gets 4 px.
+    short_side = min(frame_width, frame_height)
+    outline_width = max(1, min(4, short_side // 240))
     for box in boxes:
         left = max(0, min(frame_width - 1, box.x))
         top = max(0, min(frame_height - 1, box.y))
@@ -180,7 +184,7 @@ def _draw_boxes(draw, boxes: list[OverlayBox], *, font, frame_width: int, frame_
 
         if box.fill is not None:
             draw.rectangle((left, top, right, bottom), fill=box.fill)
-        draw.rectangle((left, top, right, bottom), outline=box.outline, width=4)
+        draw.rectangle((left, top, right, bottom), outline=box.outline, width=outline_width)
 
         if not box.label:
             continue
