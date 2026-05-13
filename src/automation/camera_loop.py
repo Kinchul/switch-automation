@@ -141,7 +141,6 @@ class CameraLoopRunner:
         self._previous_loop_decision_scores: dict[str, dict[str, float]] = {}
         self._failed_loop_score_history: dict[str, dict[str, deque[float]]] = {}
         self._current_sequence_success_rate = 0.0
-        self._target_detect_score_history: dict[str, deque[tuple[float, float]]] = {}
 
     def initialize(self) -> LoopStatsSnapshot:
         self.control.set_command("noop")
@@ -1341,47 +1340,19 @@ class CameraLoopRunner:
         return 1.0 - ((1.0 - success_rate) ** attempts)
 
     def _record_target_detect_score(self, sequence_id: str, *, score: float, threshold: float) -> None:
-        history = self._target_detect_score_history.get(sequence_id)
-        if history is None:
-            history = deque(maxlen=10)
-            self._target_detect_score_history[sequence_id] = history
-        history.append((score, threshold))
-        self.stats.set_target_detect_score_history(sequence_id, list(history))
+        self.stats.record_target_detect_score(sequence_id, score=score, threshold=threshold)
 
     def _target_detect_overlay_lines(self) -> list[str]:
         sequence_id = self._current_sequence_id or self._ensure_selected_sequence()
-        history = self._target_detect_score_history.get(sequence_id)
-        if not history:
+        stats = self.stats.target_detect_score_stats(sequence_id)
+        if not stats:
             return []
-        return [f"{score:.4f}/{threshold:.4f}" for score, threshold in history]
-
-    def _seed_target_detect_score_history(self, definition) -> None:
-        sequence_id = definition.sequence_id
-        if self._target_detect_score_history.get(sequence_id):
-            return
-
-        persisted = self.stats.target_detect_score_history(sequence_id)
-        if persisted:
-            self._target_detect_score_history[sequence_id] = deque(persisted[-10:], maxlen=10)
-            return
-
-        failed_scores = self.stats.failed_loop_score_history(sequence_id, "target_detect")
-        if not failed_scores:
-            return
-        threshold = self._target_detect_static_threshold(definition)
-        self._target_detect_score_history[sequence_id] = deque(
-            [(score, threshold) for score in failed_scores[-10:]],
-            maxlen=10,
-        )
-
-    def _target_detect_static_threshold(self, definition) -> float:
-        target_detect = definition.states.get("target_detect")
-        if target_detect is None or not target_detect.next_states:
-            return 0.0
-        target_state = definition.states.get(target_detect.next_states[0])
-        if target_state is None or target_state.scene is None:
-            return 0.0
-        return target_state.scene.threshold
+        return [
+            f"last:    {stats['last_score']:.4f}/{stats['last_threshold']:.4f}",
+            f"min:     {stats['min_score']:.4f}/{stats['min_threshold']:.4f}",
+            f"max:     {stats['max_score']:.4f}/{stats['max_threshold']:.4f}",
+            f"closest: {stats['closest_score']:.4f}/{stats['closest_threshold']:.4f}",
+        ]
 
     def _abort_if_control_requested(self) -> None:
         command = self._consume_pending_command()
@@ -1538,6 +1509,15 @@ class CameraLoopRunner:
         with self._preview_lock:
             step = self._preview_step
             preview_detail = self._preview_detail
+        score_stats = self.stats.target_detect_score_stats(sequence_id)
+        if score_stats:
+            score_line = (
+                f"score: {score_stats['last_score']:.4f}"
+                f" (threshold {score_stats['last_threshold']:.4f})"
+            )
+        else:
+            score_line = "score: -"
+        success_prob = self._success_probability(snapshot.loop_counter)
         lines = [
             detail,
             "",
@@ -1547,6 +1527,8 @@ class CameraLoopRunner:
             f"loop: {_format_duration(snapshot.loop_elapsed_seconds)}",
             f"count: {snapshot.loop_counter}",
             f"last: {snapshot.last_outcome or '-'}",
+            score_line,
+            f"probability: {success_prob:.3%}",
             f"step: {step}",
             f"timeouts: {self._timeout_reset_count}",
         ]
@@ -1658,7 +1640,6 @@ class CameraLoopRunner:
         definition = definitions[selected_sequence]
         self._current_sequence_id = selected_sequence
         self._current_sequence_success_rate = definition.success_rate
-        self._seed_target_detect_score_history(definition)
         try:
             return build_runtime(definition)
         except SequenceConfigError as exc:
@@ -1676,14 +1657,12 @@ class CameraLoopRunner:
         if selected_sequence in definitions:
             definition = definitions[selected_sequence]
             self._current_sequence_success_rate = definition.success_rate
-            self._seed_target_detect_score_history(definition)
             return selected_sequence
 
         selected_sequence = self.config.default_sequence or next(iter(definitions))
         self.control.set_selected_sequence(selected_sequence)
         definition = definitions[selected_sequence]
         self._current_sequence_success_rate = definition.success_rate
-        self._seed_target_detect_score_history(definition)
         return selected_sequence
 
     def _print_timers(self, sequence_id: str, stats: LoopStatsSnapshot) -> None:

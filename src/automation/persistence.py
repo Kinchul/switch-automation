@@ -26,16 +26,14 @@ class _StatsRecord:
     last_outcome: str | None = None
     updated_at: str | None = None
     failed_loop_score_history: dict[str, list[float]] = field(default_factory=dict)
-    target_detect_score_history: list[dict[str, float]] = field(default_factory=list)
+    target_detect_score_stats: dict[str, float] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> _StatsRecord:
         failed_history_raw = data.get("failed_loop_score_history", {})
         if not isinstance(failed_history_raw, dict):
             failed_history_raw = {}
-        target_history_raw = data.get("target_detect_score_history", [])
-        if not isinstance(target_history_raw, list):
-            target_history_raw = []
+        stats = _parse_target_detect_score_stats(data)
         return cls(
             loop_counter=int(data.get("loop_counter", 0)),
             total_elapsed_seconds=float(data.get("total_elapsed_seconds", 0.0)),
@@ -51,7 +49,7 @@ class _StatsRecord:
                 for state_name, state_scores in failed_history_raw.items()
                 if isinstance(state_scores, list)
             },
-            target_detect_score_history=_parse_target_detect_score_history(target_history_raw),
+            target_detect_score_stats=stats,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -64,7 +62,7 @@ class _StatsRecord:
             "last_outcome": self.last_outcome,
             "updated_at": self.updated_at,
             "failed_loop_score_history": self.failed_loop_score_history,
-            "target_detect_score_history": self.target_detect_score_history,
+            "target_detect_score_stats": self.target_detect_score_stats,
         }
 
     def snapshot(self) -> LoopStatsSnapshot:
@@ -229,26 +227,55 @@ class PersistentLoopStatsStore:
             return []
         return list(record.failed_loop_score_history.get(state_name, ()))
 
-    def target_detect_score_history(self, sequence_id: str) -> list[tuple[float, float]]:
+    def target_detect_score_stats(
+        self, sequence_id: str
+    ) -> dict[str, float] | None:
         record = self.sequences.get(sequence_id)
-        if record is None:
-            return []
-        return [
-            (float(entry["score"]), float(entry["threshold"]))
-            for entry in record.target_detect_score_history
-            if "score" in entry and "threshold" in entry
-        ]
+        if record is None or record.target_detect_score_stats is None:
+            return None
+        return dict(record.target_detect_score_stats)
 
-    def set_target_detect_score_history(
+    def record_target_detect_score(
         self,
         sequence_id: str,
-        scores: list[tuple[float, float]],
+        *,
+        score: float,
+        threshold: float,
     ) -> None:
         record = self._record(sequence_id)
-        record.target_detect_score_history = [
-            {"score": float(score), "threshold": float(threshold)}
-            for score, threshold in scores[-10:]
-        ]
+        score_f = float(score)
+        threshold_f = float(threshold)
+        margin = threshold_f - score_f
+        current = record.target_detect_score_stats
+        if current is None:
+            record.target_detect_score_stats = {
+                "last_score": score_f,
+                "last_threshold": threshold_f,
+                "min_score": score_f,
+                "min_threshold": threshold_f,
+                "max_score": score_f,
+                "max_threshold": threshold_f,
+                "closest_score": score_f,
+                "closest_threshold": threshold_f,
+            }
+        else:
+            current["last_score"] = score_f
+            current["last_threshold"] = threshold_f
+            if score_f < float(current.get("min_score", score_f)) or "min_threshold" not in current:
+                current["min_score"] = score_f
+                current["min_threshold"] = threshold_f
+            if score_f > float(current.get("max_score", score_f)) or "max_threshold" not in current:
+                current["max_score"] = score_f
+                current["max_threshold"] = threshold_f
+            closest_score = current.get("closest_score")
+            closest_threshold = current.get("closest_threshold")
+            if (
+                closest_score is None
+                or closest_threshold is None
+                or abs(margin) < abs(float(closest_threshold) - float(closest_score))
+            ):
+                current["closest_score"] = score_f
+                current["closest_threshold"] = threshold_f
         record.updated_at = _utcnow().isoformat()
         self.save()
 
@@ -330,11 +357,39 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _parse_target_detect_score_history(raw_history: list[object]) -> list[dict[str, float]]:
-    history: list[dict[str, float]] = []
+def _parse_target_detect_score_stats(data: dict[str, object]) -> dict[str, float] | None:
+    raw_stats = data.get("target_detect_score_stats")
+    if isinstance(raw_stats, dict):
+        try:
+            last_score = float(raw_stats["last_score"])
+            last_threshold = float(raw_stats["last_threshold"])
+            min_score = float(raw_stats["min_score"])
+            max_score = float(raw_stats["max_score"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        # Threshold per extremum was added later. Fall back to last_threshold
+        # so existing records keep working until the next score updates them.
+        min_threshold = _float_or(raw_stats.get("min_threshold"), last_threshold)
+        max_threshold = _float_or(raw_stats.get("max_threshold"), last_threshold)
+        closest_score = _float_or(raw_stats.get("closest_score"), last_score)
+        closest_threshold = _float_or(raw_stats.get("closest_threshold"), last_threshold)
+        return {
+            "last_score": last_score,
+            "last_threshold": last_threshold,
+            "min_score": min_score,
+            "min_threshold": min_threshold,
+            "max_score": max_score,
+            "max_threshold": max_threshold,
+            "closest_score": closest_score,
+            "closest_threshold": closest_threshold,
+        }
+
+    # Migrate from the older `target_detect_score_history` list-of-pairs format.
+    raw_history = data.get("target_detect_score_history")
+    if not isinstance(raw_history, list):
+        return None
+    pairs: list[tuple[float, float]] = []
     for raw_entry in raw_history:
-        score: object
-        threshold: object
         if isinstance(raw_entry, dict):
             score = raw_entry.get("score")
             threshold = raw_entry.get("threshold")
@@ -344,10 +399,32 @@ def _parse_target_detect_score_history(raw_history: list[object]) -> list[dict[s
         else:
             continue
         try:
-            history.append({"score": float(score), "threshold": float(threshold)})
+            pairs.append((float(score), float(threshold)))
         except (TypeError, ValueError):
             continue
-    return history[-10:]
+    if not pairs:
+        return None
+    last_score, last_threshold = pairs[-1]
+    min_score, min_threshold = min(pairs, key=lambda p: p[0])
+    max_score, max_threshold = max(pairs, key=lambda p: p[0])
+    closest_score, closest_threshold = min(pairs, key=lambda p: abs(p[1] - p[0]))
+    return {
+        "last_score": last_score,
+        "last_threshold": last_threshold,
+        "min_score": min_score,
+        "min_threshold": min_threshold,
+        "max_score": max_score,
+        "max_threshold": max_threshold,
+        "closest_score": closest_score,
+        "closest_threshold": closest_threshold,
+    }
+
+
+def _float_or(value: object, default: float) -> float:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
 
 
 def _load_json_object(path: Path, *, label: str) -> dict[str, object] | None:
