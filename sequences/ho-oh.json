@@ -32,10 +32,10 @@
       "scene": {
         "image_path": "../images/ho-oh/0_game_launch.png",
         "roi": {
-          "x": 552,
-          "y": 317,
-          "width": 815,
-          "height": 368
+          "x": 558,
+          "y": 320,
+          "width": 808,
+          "height": 362
         },
         "threshold": 0.1,
         "stride": 8,
@@ -70,10 +70,10 @@
       "scene": {
         "image_path": "../images/ho-oh/2_select_save.png",
         "roi": {
-          "x": 366,
-          "y": 404,
-          "width": 271,
-          "height": 62
+          "x": 372,
+          "y": 406,
+          "width": 263,
+          "height": 57
         },
         "threshold": 0.1,
         "stride": 2,
@@ -90,10 +90,10 @@
       "scene": {
         "image_path": "../images/ho-oh/3_previously.png",
         "roi": {
-          "x": 686,
-          "y": 55,
-          "width": 356,
-          "height": 63
+          "x": 220,
+          "y": 53,
+          "width": 439,
+          "height": 67
         },
         "threshold": 0.1,
         "stride": 2,
@@ -109,10 +109,10 @@
       "scene": {
         "image_path": "../images/ho-oh/4_ready.png",
         "roi": {
-          "x": 882,
-          "y": 332,
-          "width": 146,
-          "height": 238
+          "x": 878,
+          "y": 427,
+          "width": 166,
+          "height": 153
         },
         "threshold": 0.08,
         "stride": 4,
@@ -129,10 +129,10 @@
       "scene": {
         "image_path": "../images/ho-oh/5_target_failed.png",
         "roi": {
-          "x": 334,
-          "y": 157,
-          "width": 152,
-          "height": 49
+          "x": 331,
+          "y": 156,
+          "width": 161,
+          "height": 50
         },
         "threshold": 0.1,
         "stride": 4,
@@ -154,10 +154,10 @@
       "scene": {
         "image_path": "../images/ho-oh/5_target_failed.png",
         "roi": {
-          "x": 1114,
-          "y": 44,
-          "width": 394,
-          "height": 395
+          "x": 1109,
+          "y": 42,
+          "width": 401,
+          "height": 400
         },
         "threshold": 0.025,
         "search_margin": 1,
