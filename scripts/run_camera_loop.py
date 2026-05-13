@@ -601,7 +601,7 @@ def _start_touch_ui(args):
 
     def _request_select_sequence(sequence_id: str) -> None:
         loop_control.set_selected_sequence(sequence_id)
-        loop_control.set_command("restart")
+        loop_control.set_command("stop")
 
     def _list_sequences() -> list[str]:
         try:
