@@ -1,0 +1,153 @@
+{
+  "success_rate": 0.0001220703125,
+  "recovery": {
+    "states": [
+      "no_bet",
+      "rolling_left",
+      "rolling_center",
+      "rolling_right"
+    ],
+    "timeout_ms": 15000
+  },
+  "defaults": {
+    "timeout_ms": 7000,
+    "scene": {
+      "search_margin": 1,
+      "stride": 4,
+      "search_step": 4,
+      "hold_ms": 0,
+      "score_window": 3,
+      "luma_weight": 0.7,
+      "chroma_weight": 0.3,
+      "threshold": 0.025
+    },
+    "action": {
+      "frequency_hz": 1,
+      "down_ms": 50,
+      "up_ms": 150
+    }
+  },
+  "states": {
+    "reset_gain": {
+      "scene": {
+        "image_path": "../images/casino/0_start.png",
+        "roi": {
+          "x": 1026,
+          "y": 190,
+          "width": 167,
+          "height": 57
+        }
+      },
+      "next_states": [
+        "betting"
+      ],
+      "timeout_ms": 15000,
+      "action": {
+        "buttons": [
+          "A"
+        ],
+        "frequency_hz": 0,
+        "down_ms": 15000
+      }
+    },
+    "betting": {
+      "scene": {
+        "image_path": "../images/casino/1_rolling.png",
+        "roi": {
+          "x": 415,
+          "y": 282,
+          "width": 139,
+          "height": 366
+        }
+      },
+      "next_states": [
+        "rolling_left"
+      ],
+      "timeout_ms": 15000,
+      "action": {
+        "buttons": [
+          "DPAD_DOWN"
+        ],
+        "frequency_hz": 5
+      }
+    },
+    "rolling_left": {
+      "scene": {
+        "image_path": "../images/casino/2_goal_middle.png",
+        "roi": {
+          "x": 615,
+          "y": 533,
+          "width": 188,
+          "height": 137
+        }
+      },
+      "next_states": [
+        "select_left"
+      ],
+      "timeout_ms": 15000
+    },
+    "select_left": {
+      "action": {
+        "buttons": [
+          "A"
+        ],
+        "frequency_hz": 0
+      },
+      "next_states": [
+        "rolling_center"
+      ]
+    },
+    "rolling_center": {
+      "scene": {
+        "image_path": "../images/casino/1_rolling.png",
+        "roi": {
+          "x": 865,
+          "y": 533,
+          "width": 188,
+          "height": 137
+        }
+      },
+      "next_states": [
+        "select_center"
+      ],
+      "timeout_ms": 15000
+    },
+    "select_center": {
+      "action": {
+        "buttons": [
+          "A"
+        ],
+        "frequency_hz": 0
+      },
+      "next_states": [
+        "rolling_right"
+      ]
+    },
+    "rolling_right": {
+      "scene": {
+        "image_path": "../images/casino/1_rolling.png",
+        "roi": {
+          "x": 1115,
+          "y": 533,
+          "width": 188,
+          "height": 137
+        }
+      },
+      "next_states": [
+        "select_right"
+      ],
+      "timeout_ms": 15000
+    },
+    "select_right": {
+      "action": {
+        "buttons": [
+          "A"
+        ],
+        "frequency_hz": 0
+      },
+      "next_states": [
+        "reset_gain"
+      ]
+    }
+  }
+}
