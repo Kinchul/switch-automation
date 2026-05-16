@@ -524,7 +524,7 @@ class CameraLoopRunner:
                         f'(margin={state.decision_margin:.4f})'
                     )
                 self._set_preview_detector(
-                    step=f'State "{state.name}"',
+                    step=state.name,
                     detector=best_match.detector,
                     result=best_match.result,
                     detail=detail,
@@ -615,7 +615,7 @@ class CameraLoopRunner:
 
             preview_detail = f'Observing "{next_state_name}" for loop decision: score={_match_score(candidate):.4f}.'
             self._set_preview_detector(
-                step=f'State "{state.name}"',
+                step=state.name,
                 detector=detector,
                 result=result,
                 detail=preview_detail,
@@ -799,7 +799,7 @@ class CameraLoopRunner:
                     score_used = _match_score(candidate)
                     candidate.decision_reason = "accepted"
                     self._set_preview_detector(
-                        step=f'State "{state.name}"',
+                        step=state.name,
                         detector=detector,
                         result=result,
                         detail=f'Matched "{next_state_name}": score={score_used:.4f}/th={threshold:.4f}.',
@@ -870,7 +870,7 @@ class CameraLoopRunner:
             winner_threshold = next_state.scene.threshold if next_state.scene else 0.0
             margin_detail = f"margin={score_margin:.4f}" if runner_up is not None else None
             self._set_preview_detector(
-                step=f'State "{state.name}"',
+                step=state.name,
                 detector=best_match.detector,
                 result=best_result,
                 detail=f'Decided "{winner_name}": score={best_score:.4f}/th={winner_threshold:.4f}.',
@@ -1184,7 +1184,7 @@ class CameraLoopRunner:
         self._record_loop_decision_score(runtime.sequence_id, state.name, match)
         detail = f'Entered state "{state.name}" in sequence "{runtime.sequence_id}".'
         self._set_preview_detector(
-            step=f'State "{state.name}"',
+            step=state.name,
             detector=match.detector,
             result=match.result,
             detail=detail,
@@ -1298,9 +1298,9 @@ class CameraLoopRunner:
         with self._preview_lock:
             step = self._preview_step
         return [
-            f"sequence: {sequence_id}",
-            f"status  : {snapshot.status}",
-            f"step    : {step}",
+            f"seq.  : {sequence_id}",
+            f"status: {snapshot.status}",
+            f"step  : {step}",
         ]
 
     def _bottom_left_overlay_lines(self) -> list[str]:
@@ -1348,10 +1348,14 @@ class CameraLoopRunner:
         if not stats:
             return []
         return [
-            f"last:    {stats['last_score']:.4f}/{stats['last_threshold']:.4f}",
-            f"min:     {stats['min_score']:.4f}/{stats['min_threshold']:.4f}",
-            f"max:     {stats['max_score']:.4f}/{stats['max_threshold']:.4f}",
-            f"closest: {stats['closest_score']:.4f}/{stats['closest_threshold']:.4f}",
+            f"last: {stats['last_score']:.4f}/{stats['last_threshold']:.4f}",
+            f"min : {stats['min_score']:.4f}/{stats['min_threshold']:.4f}",
+            f"max : {stats['max_score']:.4f}/{stats['max_threshold']:.4f}",
+            f"best: {stats['closest_score']:.4f}/{stats['closest_threshold']:.4f}",
+            # f"last: {((1-stats['last_score'])/(1-stats['last_threshold'])):.2f}%",
+            # f"min : {((1-stats['min_score'])/(1-stats['min_threshold'])):.2f}%",
+            # f"max : {((1-stats['max_score'])/(1-stats['max_threshold'])):.2f}%",
+            # f"best: {((1-stats['closest_score'])/(1-stats['closest_threshold'])):.2}%",
         ]
 
     def _abort_if_control_requested(self) -> None:
