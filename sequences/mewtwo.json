@@ -23,7 +23,7 @@
       "threshold": 0.1
     },
     "action": {
-      "frequency_hz": 3.0,
+      "frequency_hz": 1.0,
       "down_ms": 100,
       "up_ms": 100
     }
@@ -111,8 +111,7 @@
       "next_states": ["fight_started"],
       "timeout_ms": 9500,
       "action": {
-        "buttons": ["A"],
-        "frequency_hz": 1.0
+        "buttons": ["A"]
       }
     },
     "fight_started": {
