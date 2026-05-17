@@ -1351,7 +1351,7 @@ class CameraLoopRunner:
             f"last: {stats['last_score']:.4f}/{stats['last_threshold']:.4f}",
             f"min : {stats['min_score']:.4f}/{stats['min_threshold']:.4f}",
             f"max : {stats['max_score']:.4f}/{stats['max_threshold']:.4f}",
-            f"best: {stats['closest_score']:.4f}/{stats['closest_threshold']:.4f}",
+            # f"best: {stats['closest_score']:.4f}/{stats['closest_threshold']:.4f}",
             # f"last: {((1-stats['last_score'])/(1-stats['last_threshold'])):.2f}%",
             # f"min : {((1-stats['min_score'])/(1-stats['min_threshold'])):.2f}%",
             # f"max : {((1-stats['max_score'])/(1-stats['max_threshold'])):.2f}%",
